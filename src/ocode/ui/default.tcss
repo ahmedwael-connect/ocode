@@ -20,6 +20,12 @@ Screen {
     height: 1;
 }
 
+#breadcrumb {
+    background: #1e1e2e;
+    color: #89b4fa;
+    height: 1;
+}
+
 #editor {
     background: #1e1e2e;
     height: 1fr;

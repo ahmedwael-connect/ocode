@@ -95,7 +95,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from ocode.app import OcodeApp
 
-    OcodeApp(start_path=start, config=config).run()
+    app = OcodeApp(
+        start_path=start, config=config, conf_override=args.conf, bin_override=args.odoo_bin
+    )
+    app.run()
     return 0
 
 
