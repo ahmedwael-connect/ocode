@@ -26,6 +26,16 @@ Screen {
     height: 1;
 }
 
+#logs {
+    background: #11111b;
+    border-top: solid #45475a;
+    height: 10;
+}
+
+#logs.hidden {
+    display: none;
+}
+
 #editor {
     background: #1e1e2e;
     height: 1fr;

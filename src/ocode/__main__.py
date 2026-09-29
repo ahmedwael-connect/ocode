@@ -50,6 +50,21 @@ def cmd_doctor() -> int:
         print(f"textual: {_t.__version__}")
     except ImportError:
         print("textual: MISSING (pip install textual)")
+    try:
+        from ocode.engines.opd.detector import detect_project
+
+        proj = detect_project(Path.cwd())
+        if proj.found:
+            print(f"odoo: root={proj.root} version={proj.version or '?'}")
+            print(f"odoo: {len(proj.modules)} modules, {len(proj.addons_paths)} addons paths")
+            if proj.conf and proj.conf.path:
+                print(f"odoo: conf={proj.conf.path} db={proj.conf.db_name or '—'}")
+            if proj.odoo_bin:
+                print(f"odoo: bin={proj.odoo_bin}")
+        else:
+            print("odoo: no installation detected here")
+    except OSError as exc:
+        print(f"odoo: detection failed ({exc})")
     return 0
 
 
@@ -58,11 +73,23 @@ def cmd_init(path: Path) -> int:
     cfgdir = d / ".ocode"
     cfgdir.mkdir(parents=True, exist_ok=True)
     cfg = cfgdir / "config.toml"
-    if cfg.exists():
+    if not cfg.exists():
+        cfg.write_text(f'[workspace]\nname = "{d.name}"\n', encoding="utf-8")
+        print(f"created: {cfg}")
+    else:
         print(f"exists: {cfg}")
-        return 0
-    cfg.write_text(f'[workspace]\nname = "{d.name}"\n', encoding="utf-8")
-    print(f"created: {cfg}")
+    servers = cfgdir / "servers.toml"
+    if not servers.exists():
+        servers.write_text(
+            "[profile.dev]\n"
+            'odoo_bin = ""\npython = ""\nconf = ""\ndb = ""\nmode = "managed"\n'
+            'flags = ["--dev=reload,qweb,xml", "--log-level=info"]\n'
+            'lint_before_restart = "warn"\n',
+            encoding="utf-8",
+        )
+        print(f"created: {servers}")
+    else:
+        print(f"exists: {servers}")
     return 0
 
 

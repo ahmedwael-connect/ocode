@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Coroutine
 from pathlib import Path
 
 from textual import events
@@ -15,6 +16,8 @@ from ocode.core.config import OcodeConfig
 from ocode.core.events import EventBus
 from ocode.core.tasks import TaskScheduler
 from ocode.engines.opd.detector import OdooProject, detect_project
+from ocode.engines.oss.manager import ServerManager
+from ocode.engines.oss.profiles import ServerProfile, default_profile, load_profiles, save_profiles
 from ocode.engines.ote.document import Document
 from ocode.engines.ote.highlight import detect_language
 from ocode.engines.ote.search import FindOptions
@@ -25,8 +28,10 @@ from ocode.engines.ses import CursorPos, SessionData, SessionManager
 from ocode.engines.smn.related import cycle_related, find_module_dir, key_file, related_files
 from ocode.engines.smn.search import ContentHit
 from ocode.ui.screens import FilterScreen, GrepScreen
+from ocode.ui.screens.server import ConfirmScreen, ServerSetupScreen, UpdateChooserScreen
 from ocode.ui.widgets.editor import EditorSaved, OcodeEditor
 from ocode.ui.widgets.findbar import FindBar
+from ocode.ui.widgets.logpanel import LogLinkClicked, LogPanel, level_badge
 from ocode.ui.widgets.proj_tree import FilePicked, OdooTree
 
 
@@ -54,6 +59,12 @@ def build_default_commands() -> CommandRegistry:
     reg.register("ocode.keyfile.access", "Open access CSV")
     reg.register("ocode.keyfile.views", "Open main views XML")
     reg.register("ocode.oss.restart", "Odoo: Restart Server", keybinding="f5")
+    reg.register("ocode.oss.toggle", "Odoo: Start/Stop Server", keybinding="f6")
+    reg.register("ocode.oss.updateCurrent", "Odoo: Restart + Update Current", keybinding="ctrl+f5")
+    reg.register("ocode.oss.updateChoose", "Odoo: Update Modules...", keybinding="ctrl+shift+f5")
+    reg.register("ocode.oss.setup", "Odoo: Server Profiles & Flags...")
+    reg.register("ocode.view.toggleLogs", "Toggle Log Panel", keybinding="ctrl+j")
+    reg.register("ocode.log.clear", "Clear Logs")
     reg.register("ocode.app.quit", "Quit", keybinding="ctrl+q")
     return reg
 
@@ -77,6 +88,11 @@ class OcodeApp(App[None]):
         ("ctrl+0", "focus_tree", "Tree"),
         ("ctrl+1", "focus_editor", "Edit"),
         ("ctrl+k", "chord", "Chord"),
+        ("ctrl+j", "toggle_logs", "Logs"),
+        ("f5", "server_restart", "Restart"),
+        ("f6", "server_toggle", "Start/Stop"),
+        ("ctrl+f5", "server_update_current", "UpdCur"),
+        ("ctrl+shift+f5", "server_update_choose", "Update"),
         ("ctrl+shift+p", "show_palette", "Palette"),
         ("f3", "find_next", "Next"),
         ("shift+f3", "find_prev", "Prev"),
@@ -106,6 +122,10 @@ class OcodeApp(App[None]):
         self._chord = False
         self._session: SessionManager | None = None
         self._recent: list[str] = []
+        self.server: ServerManager | None = None
+        self.server_profiles: dict[str, ServerProfile] = {}
+        self.server_profile_name = "dev"
+        self._last_error_badge = ""
 
     # -- compose -------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -117,6 +137,7 @@ class OcodeApp(App[None]):
                 yield Static("", id="breadcrumb")
                 yield Static("", id="tabbar")
                 yield OcodeEditor(EditorState(), id="editor")
+                yield LogPanel(id="logs")
                 yield FindBar(id="findbar")
         yield Static("", id="statusbar")
         yield Footer()
@@ -142,12 +163,138 @@ class OcodeApp(App[None]):
         pending = SwapManager.pending()
         if pending:
             self.notify(f"{len(pending)} swap file(s) found — recovery available", timeout=5)
+        self._init_server(ws)
         self.update_chrome()
         self.set_interval(5.0, self._autoswap)
+        self.set_interval(1.0, self._poll_tailer)
         self.query_one("#editor", OcodeEditor).focus()
 
     def on_unmount(self) -> None:
         self._save_session()
+        srv = self.server
+        if srv is not None and srv.proc.running:
+            try:
+                import asyncio as _aio
+
+                loop = _aio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(srv.stop())
+            except (OSError, RuntimeError):
+                pass
+
+    # -- server --------------------------------------------------------
+    def _init_server(self, ws: Path) -> None:
+        proj = self.project
+        try:
+            self.server_profiles = load_profiles(ws)
+        except OSError:
+            self.server_profiles = {}
+        prof = self.server_profiles.get("dev")
+        if prof is None:
+            obin = str(proj.odoo_bin) if proj and proj.odoo_bin else ""
+            conf = str(proj.conf.path) if proj and proj.conf and proj.conf.path else ""
+            db = proj.conf.db_name if proj and proj.conf else ""
+            python = ""
+            if proj and proj.venv:
+                for cand in (proj.venv / "bin" / "python", proj.venv / "bin" / "python3"):
+                    if cand.exists():
+                        python = str(cand)
+                        break
+            if self.conf_override:
+                conf = str(self.conf_override)
+            if self.bin_override:
+                obin = str(self.bin_override)
+            prof = default_profile(odoo_bin=obin, python=python, conf=conf, db=db)
+            if proj and proj.version == "16.0":
+                prof.flags = [f for f in prof.flags if "gevent" not in f]
+        self.server_profiles.setdefault("dev", prof)
+        self.server = ServerManager(prof)
+        try:
+            panel = self.query_one("#logs", LogPanel)
+            panel.buffer = self.server.logs
+        except Exception:
+            pass
+        self.server.on_log(lambda _rec: self._on_server_log())
+        self.server.on_status(lambda _s: self.update_chrome())
+
+    def _on_server_log(self) -> None:
+        try:
+            panel = self.query_one("#logs", LogPanel)
+        except Exception:
+            return
+        panel.refresh(layout=True)
+        badge = level_badge(panel.buffer)
+        if badge != self._last_error_badge:
+            self._last_error_badge = badge
+            self.update_chrome()
+
+    def _poll_tailer(self) -> None:
+        srv = self.server
+        if srv is None:
+            return
+        try:
+            if srv.poll_tailer():
+                self._on_server_log()
+        except OSError:
+            pass
+
+    def _server_status_text(self) -> str:
+        srv = self.server
+        if srv is None:
+            return "Stopped"
+        snap = srv.snapshot()
+        if snap.status == "Running" and snap.pid:
+            uptime = _fmt_uptime(snap.uptime)
+            return f"● Running :{snap.port} (pid {snap.pid}, up {uptime})"
+        return snap.status
+
+    def current_module_name(self) -> str | None:
+        try:
+            st = self.active_state()
+            if st.doc.path is None or not self.project:
+                return None
+            mod = find_module_dir(st.doc.path, self.project.modules)
+            return mod.name if mod else None
+        except Exception:
+            return None
+
+    def _resolve_log_link(self, raw: str) -> Path | None:
+        p = Path(raw)
+        if p.is_absolute() and p.is_file():
+            return p
+        proj = self.project
+        if proj is None:
+            return None
+        suffix = Path(raw)
+        parts = suffix.parts[-3:]
+        cands: list[Path] = []
+        if proj.root:
+            cands.append(proj.root.joinpath(*parts))
+        for ap in proj.addons_paths:
+            cands.append(ap.joinpath(*parts))
+        for c in cands:
+            try:
+                if c.is_file():
+                    return c
+            except OSError:
+                continue
+        # fallback: match by filename under modules
+        for m in proj.modules:
+            try:
+                for f in m.path.rglob(suffix.name):
+                    if f.is_file():
+                        return f
+            except OSError:
+                continue
+        return None
+
+    async def on_log_link_clicked(self, event: LogLinkClicked) -> None:
+        target = self._resolve_log_link(event.path)
+        if target is None:
+            self.notify(f"File not found: {event.path}", severity="warning")
+            return
+        self.open_path(target, event.line)
+        self.query_one("#editor", OcodeEditor).focus()
 
     # -- tabs / docs ---------------------------------------------------
     def new_untitled(self) -> None:
@@ -331,7 +478,9 @@ class OcodeApp(App[None]):
             conf = self.project.conf
             db = conf.db_name if conf and conf.db_name else "—"
             odoo = f" | odoo {self.project.version or '?'} | db: {db}"
-        info = f"{dot2} {fname} | {lang} | {enc} | {eol} | {loc}{nmatch}{odoo}"
+        srv_txt = f" | {self._server_status_text()}"
+        badge = f" | {self._last_error_badge}" if self._last_error_badge else ""
+        info = f"{dot2} {fname} | {lang} | {enc} | {eol} | {loc}{nmatch}{odoo}{srv_txt}{badge}"
         status.update(info)
 
     async def on_key(self, event: events.Key) -> None:
@@ -573,6 +722,175 @@ class OcodeApp(App[None]):
             self._swap.clear()
         self.notify(f"Saved {event.path}" if event.path else "Saved", timeout=2)
         self.update_chrome()
+        # auto-update current module on save (opt-in, FR-OSS-009)
+        srv = self.server
+        if srv is None or not srv.profile.auto_update_on_save or event.path is None:
+            return
+        mod = self.current_module_name()
+        if mod is None:
+            return
+        if srv.profile.lint_before_restart == "block":
+            self.notify("lint gate: no linter yet (M4) — update skipped", severity="warning")
+            return
+        if srv.profile.lint_before_restart == "warn":
+            self.notify("lint gate: warn (no linter yet, M4)", timeout=2)
+        self.notify(f"Auto-updating {mod}…", timeout=2)
+        try:
+            await srv.restart_update([mod])
+        except OSError as exc:
+            self.notify(f"Auto-update failed: {exc}", severity="error")
+        self._report_server_hint()
+        self.update_chrome()
+
+    # -- server actions (FR-OSS-001..005) --------------------------------
+    async def action_server_toggle(self) -> None:
+        srv = self.server
+        if srv is None:
+            self.notify("No server profile", severity="warning")
+            return
+        if srv.status in ("Running", "Updating", "Starting"):
+            await srv.stop()
+            self.notify("Server stopped", timeout=2)
+        else:
+            self.notify(f"$ {srv.preview()}", timeout=4)
+            await srv.start()
+            self._report_server_hint()
+        self.update_chrome()
+
+    async def action_server_restart(self) -> None:
+        srv = self.server
+        if srv is None:
+            return
+        self.notify(f"$ {srv.preview()}", timeout=4)
+        await srv.restart()
+        self._report_server_hint()
+        self.update_chrome()
+
+    async def action_server_update_current(self) -> None:
+        srv = self.server
+        if srv is None:
+            return
+        mod = self.current_module_name()
+        if mod is None:
+            self.notify("No current module to update", severity="warning")
+            return
+        self.notify(f"Restart + update {mod}…", timeout=3)
+        await srv.restart_update([mod])
+        self._report_server_hint()
+        self.update_chrome()
+
+    def action_server_update_choose(self) -> None:
+        srv = self.server
+        if srv is None:
+            return
+        mods = [m.name for m in self.project.modules] if self.project else []
+        self.push_screen(
+            UpdateChooserScreen(mods, self.current_module_name()), self._on_update_chosen
+        )
+
+    def _on_update_chosen(self, mods: list[str] | None) -> None:
+        if not mods:
+            return
+        if "all" in mods:
+            self.push_screen(ConfirmScreen("Update ALL modules? (-u all)"), self._on_update_all)
+            return
+        srv = self.server
+        if srv is None:
+            return
+
+        async def _run() -> None:
+            assert srv is not None
+            await srv.restart_update(mods)
+            self._report_server_hint()
+            self.update_chrome()
+
+        self._spawn(_run())
+
+    def _on_update_all(self, confirmed: bool | None) -> None:
+        if not confirmed:
+            return
+        srv = self.server
+        if srv is None:
+            return
+
+        async def _run() -> None:
+            assert srv is not None
+            await srv.restart_update(["all"])
+            self._report_server_hint()
+            self.update_chrome()
+
+        self._spawn(_run())
+
+    def _spawn(self, coro: Coroutine[object, object, None]) -> None:
+        import asyncio as _aio
+
+        try:
+            _aio.ensure_future(coro)
+        except RuntimeError as exc:
+            self.notify(f"Cannot run: {exc}", severity="error")
+
+    def _report_server_hint(self) -> None:
+        srv = self.server
+        if srv is None:
+            return
+        hint = srv.snapshot_hint
+        if hint is None and srv.status == "Crashed" and srv.logs.records():
+            from ocode.engines.oss.failure import detect_failure as _df
+
+            hint = _df("\n".join(r.raw for r in srv.logs.records()[-120:]))
+            srv.snapshot_hint = hint
+        if hint is None:
+            return
+        extra = ""
+        if hint.links:
+            first = hint.links[0]
+            extra = f" — {first[0]}:{first[1]} (click log link to open)"
+        self.notify(f"{srv.status}: {hint.summary}{extra}", severity="error", timeout=8)
+
+    def action_server_setup(self) -> None:
+        srv = self.server
+        if srv is None:
+            return
+        self.push_screen(ServerSetupScreen(srv.profile), self._on_profile_saved)
+
+    def _on_profile_saved(self, prof: ServerProfile | None) -> None:
+        if prof is None or self.server is None:
+            return
+        ws = (self.project.root if self.project and self.project.root else self.start_path)
+        ws = ws if ws.is_dir() else ws.parent
+        self.server_profiles[prof.name] = prof
+        try:
+            save_profiles(ws, self.server_profiles)
+        except OSError as exc:
+            self.notify(f"Cannot save profile: {exc}", severity="error")
+            return
+        running = self.server.proc.running
+        self.server.profile = prof
+        try:
+            panel = self.query_one("#logs", LogPanel)
+            panel.buffer = self.server.logs
+        except Exception:
+            pass
+        suffix = " (restart to apply)" if running else ""
+        self.notify(f"Profile '{prof.name}' saved{suffix}", timeout=3)
+        self.update_chrome()
+
+    def action_toggle_logs(self) -> None:
+        try:
+            panel = self.query_one("#logs", LogPanel)
+        except Exception:
+            return
+        panel.display = not panel.display
+        if panel.display:
+            panel.refresh(layout=True)
+
+    def action_log_clear(self) -> None:
+        try:
+            self.query_one("#logs", LogPanel).clear()
+        except Exception:
+            pass
+        self._last_error_badge = ""
+        self.update_chrome()
 
 
 def _is_relative(p: Path, base: Path) -> bool:
@@ -581,3 +899,14 @@ def _is_relative(p: Path, base: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _fmt_uptime(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
