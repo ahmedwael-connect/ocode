@@ -1,0 +1,19 @@
+/* ocode default theme (M0 placeholder, Textual CSS) */
+Screen {
+    background: #1e1e2e;
+    color: #cdd6f4;
+}
+
+#sidebar {
+    background: #181825;
+    border-right: solid #45475a;
+}
+
+#editor-placeholder {
+    background: #1e1e2e;
+}
+
+#statusbar {
+    background: #313244;
+    color: #cdd6f4;
+}

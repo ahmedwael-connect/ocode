@@ -1,0 +1,5 @@
+# Per-Odoo-version profile (M0 example). Full profiles land in M2/M4.
+# Tracks divergences like <tree> -> <list>, attrs -> invisible= (17+).
+version = "17.0"
+tree_tag = "list"   # 17+ prefers <list>, <tree> deprecated in 18+
+attrs_deprecated = true
