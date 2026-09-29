@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.env/
+
+# Testing / quality
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+hypothesis/
+
+# ocode runtime
+~/.cache/ocode/ placeholder - local only
+*.sqlite
+*.log
+
+# Sessions / swap / state
+.local/state/ocode/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Packaging
+debian/files/
+debian/*.substvars/
+debian/*.debhelper/
+debian/debhelper-build-stamp
