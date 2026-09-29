@@ -64,10 +64,29 @@ def test_parse_position(tmp_path: Path) -> None:
     assert p == f and line == 10 and col == 3
 
 
-async def test_app_pilot_smoke() -> None:
+async def test_app_pilot_smoke(tmp_path: Path) -> None:
     from ocode.app import OcodeApp
 
-    app = OcodeApp()
+    f = tmp_path / "hello.py"
+    f.write_text("x = 1\n", encoding="utf-8")
+    app = OcodeApp(start_path=f)
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert app.query_one("#editor-placeholder") is not None
+        assert app.query_one("#editor") is not None
+        assert app.query_one("#tabbar") is not None
+        assert app.query_one("#statusbar") is not None
+
+
+async def test_editor_typing_and_save(tmp_path: Path) -> None:
+    from ocode.app import OcodeApp
+
+    f = tmp_path / "edit.py"
+    f.write_text("a = 1\n", encoding="utf-8")
+    app = OcodeApp(start_path=f)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("end", "x", "space", "=", "space", "2")
+        await pilot.pause()
+        st = app.active_state()
+        assert "x = 2" in st.doc.text
+        assert st.doc.dirty

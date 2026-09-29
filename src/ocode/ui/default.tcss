@@ -1,4 +1,4 @@
-/* ocode default theme (M0 placeholder, Textual CSS) */
+/* ocode default theme (M1 editor) */
 Screen {
     background: #1e1e2e;
     color: #cdd6f4;
@@ -7,13 +7,36 @@ Screen {
 #sidebar {
     background: #181825;
     border-right: solid #45475a;
+    width: 28;
 }
 
-#editor-placeholder {
+#editor-area {
     background: #1e1e2e;
+}
+
+#tabbar {
+    background: #181825;
+    color: #a6adc8;
+    height: 1;
+}
+
+#editor {
+    background: #1e1e2e;
+    height: 1fr;
+}
+
+#findbar {
+    background: #313244;
+    height: auto;
+    display: none;
+}
+
+#findbar.visible {
+    display: block;
 }
 
 #statusbar {
     background: #313244;
     color: #cdd6f4;
+    height: 1;
 }
