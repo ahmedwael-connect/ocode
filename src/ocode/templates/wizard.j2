@@ -1,0 +1,8 @@
+from odoo import models, fields
+
+
+class {{ class_name }}(models.TransientModel):
+    _name = '{{ name }}'
+    _description = '{{ description or name }}'
+
+    name = fields.Char(string='Name')

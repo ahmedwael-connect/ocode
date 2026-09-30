@@ -1,0 +1,16 @@
+{
+    'name': '{{ display }}',
+    'version': '{{ version }}',
+    'summary': '{{ summary or display }}',
+    'category': '{{ category }}',
+    'author': '{{ author }}',
+    'website': '{{ website }}',
+    'license': '{{ license }}',
+    'depends': [{% for d in depends %}'{{ d }}'{% if not loop.last %}, {% endif %}{% endfor %}],
+    'data': [
+        'security/ir.model.access.csv',
+{% for f in data_files %}        '{{ f }}',
+{% endfor %}    ],
+    'installable': True,
+    'application': False,
+}

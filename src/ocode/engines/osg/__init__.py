@@ -1,0 +1,76 @@
+"""OSG engine: Odoo scaffolding + generators (PRD §4.7, M5). Jinja2, version-aware."""
+
+from ocode.engines.osg.access import ensure_access_csv
+from ocode.engines.osg.applier import PlannedChange, apply_changes, preview_diff
+from ocode.engines.osg.naming import (
+    class_name_for,
+    file_stem_for,
+    model_name_for,
+    technical_name_for,
+    xml_id_for,
+)
+from ocode.engines.osg.render import render_template, template_names
+from ocode.engines.osg.scaffold import (
+    scaffold_access,
+    scaffold_controller,
+    scaffold_cron,
+    scaffold_model,
+    scaffold_module,
+    scaffold_record_rule,
+    scaffold_report,
+    scaffold_security_groups,
+    scaffold_test,
+    scaffold_view,
+    scaffold_wizard,
+    scaffold_xpath,
+)
+from ocode.engines.osg.specs import (
+    AccessSpec,
+    ControllerSpec,
+    CronSpec,
+    FieldSpec,
+    ModelSpec,
+    ModuleSpec,
+    ReportSpec,
+    TestSpec,
+    ViewSpec,
+    WizardSpec,
+    XpathSpec,
+)
+
+__all__ = [
+    "AccessSpec",
+    "ControllerSpec",
+    "CronSpec",
+    "FieldSpec",
+    "ModelSpec",
+    "ModuleSpec",
+    "PlannedChange",
+    "ReportSpec",
+    "TestSpec",
+    "ViewSpec",
+    "WizardSpec",
+    "XpathSpec",
+    "apply_changes",
+    "class_name_for",
+    "ensure_access_csv",
+    "file_stem_for",
+    "model_name_for",
+    "preview_diff",
+    "render_template",
+    "scaffold_access",
+    "scaffold_controller",
+    "scaffold_cron",
+    "scaffold_model",
+    "scaffold_module",
+    "scaffold_record_rule",
+    "scaffold_report",
+    "scaffold_security_groups",
+    "scaffold_test",
+    "scaffold_view",
+    "scaffold_wizard",
+    "scaffold_xpath",
+    "technical_name_for",
+    "template_names",
+    "xml_id_for",
+]

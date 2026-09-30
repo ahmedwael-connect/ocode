@@ -48,6 +48,12 @@ Screen {
     height: 10;
 }
 
+#shell {
+    background: #0d1117;
+    border-top: solid #89b4fa;
+    height: 12;
+}
+
 #complete {
     background: #313244;
     border: solid #89b4fa;

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="{{ xml_id }}" model="ir.rule">
+        <field name="name">{{ name }}</field>
+        <field name="model_id" ref="{{ model_xmlid }}"/>
+        <field name="domain_force">[('create_uid', '=', user.id)]</field>
+        <field name="groups" eval="[(4, ref('{{ group_xmlid }}'))]"/>
+    </record>
+</odoo>

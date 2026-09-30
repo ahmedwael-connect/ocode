@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+{% for kind in kinds %}
+    <record id="{{ xml_prefix }}_{{ kind }}" model="ir.ui.view">
+        <field name="name">{{ view_name }}.{{ kind }}</field>
+        <field name="model">{{ model }}</field>
+        <field name="arch" type="xml">
+{% if kind == 'form' %}            <form>
+                <sheet>
+                    <group>
+{% for f in fields %}                        <field name="{{ f.name }}"/>
+{% endfor %}                    </group>
+                </sheet>
+            </form>
+{% elif kind in ('list', 'tree') %}            <{{ list_tag }}>
+{% for f in fields %}                <field name="{{ f.name }}"/>
+{% endfor %}            </{{ list_tag }}>
+{% elif kind == 'search' %}            <search>
+{% for f in fields %}                <field name="{{ f.name }}"/>
+{% endfor %}            </search>
+{% elif kind == 'kanban' %}            <kanban>
+                <templates>
+                    <t t-name="kanban-box">
+                        <div class="oe_kanban_global_click">
+{% for f in fields %}                            <field name="{{ f.name }}"/>
+{% endfor %}                        </div>
+                    </t>
+                </templates>
+            </kanban>
+{% else %}            <{{ kind }}>
+{% for f in fields %}                <field name="{{ f.name }}"/>
+{% endfor %}            </{{ kind }}>
+{% endif %}        </field>
+    </record>
+{% endfor %}
+{% if with_action %}
+    <record id="{{ xml_prefix }}_action" model="ir.actions.act_window">
+        <field name="name">{{ view_name }}</field>
+        <field name="res_model">{{ model }}</field>
+        <field name="view_mode">{{ view_mode }}</field>
+    </record>
+{% endif %}
+{% if with_menu %}
+    <menuitem id="{{ xml_prefix }}_menu" name="{{ view_name }}" action="{{ xml_prefix }}_action"/>
+{% endif %}
+</odoo>

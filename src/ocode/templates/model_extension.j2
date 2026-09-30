@@ -1,0 +1,12 @@
+from odoo import models, fields
+
+
+class {{ class_name }}(models.Model):
+    _inherit = '{{ inherit }}'
+{% for f in fields %}
+    {{ f.name }} = fields.{{ f.ftype }}({% if f.comodel %}'{{ f.comodel }}', {% endif %}string='{{ f.string or f.name }}'{% if f.required %}, required=True{% endif %}{% if f.compute %}, compute='{{ f.compute }}'{% endif %}{% if f.related %}, related='{{ f.related }}'{% endif %})
+{% endfor %}
+{% for m in methods %}
+    def {{ m.name }}(self):
+        super().{{ m.name }}()
+{% endfor %}

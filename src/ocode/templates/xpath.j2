@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="{{ xml_id }}" model="ir.ui.view">
+        <field name="name">{{ view_name }}</field>
+        <field name="model">{{ model }}</field>
+        <field name="inherit_id" ref="{{ parent_ref }}"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='{{ anchor }}']" position="{{ position }}">
+                <field name="{{ field }}"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

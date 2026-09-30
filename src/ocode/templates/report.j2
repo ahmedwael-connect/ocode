@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <template id="{{ template_id }}">
+        <t t-call="web.html_container">
+            <t t-foreach="docs" t-as="doc">
+                <div class="page">
+                    <h2><span t-field="doc.name"/></h2>
+                </div>
+            </t>
+        </t>
+    </template>
+
+    <record id="{{ report_id }}" model="ir.actions.report">
+        <field name="name">{{ description or name }}</field>
+        <field name="model">{{ model }}</field>
+        <field name="report_type">qweb-pdf</field>
+        <field name="report_name">{{ template_ref }}</field>
+    </record>
+</odoo>

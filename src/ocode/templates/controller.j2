@@ -1,0 +1,7 @@
+from odoo import http
+
+
+class {{ class_name }}(http.Controller):
+    @http.route('{{ route }}', auth='{{ auth }}', website=True)
+    def index(self, **kw):
+        return "Hello from {{ module }}"

@@ -23,6 +23,8 @@ from ocode.engines.omls.diagnostics import Diagnostic, FileCtx, analyze_file
 from ocode.engines.omls.quickfix import apply_fix, available_fixes
 from ocode.engines.omls.snippets import SNIPPETS, expand_snippet, render_snippet
 from ocode.engines.opd.detector import OdooProject, detect_project
+from ocode.engines.osg.applier import PlannedChange, apply_changes, preview_diff
+from ocode.engines.osh.shell import ShellSession, is_production_db, shell_command
 from ocode.engines.oss.manager import ServerManager
 from ocode.engines.oss.profiles import ServerProfile, default_profile, load_profiles, save_profiles
 from ocode.engines.ote.document import Document
@@ -35,6 +37,22 @@ from ocode.engines.ses import CursorPos, SessionData, SessionManager
 from ocode.engines.smn.related import cycle_related, find_module_dir, key_file, related_files
 from ocode.engines.smn.search import ContentHit
 from ocode.ui.screens import FilterScreen, GrepScreen
+from ocode.ui.screens.generate import (
+    GENERATORS,
+    AccessScreen,
+    ControllerScreen,
+    CronScreen,
+    DiffScreen,
+    GroupsScreen,
+    InheritModelScreen,
+    ModelScreen,
+    NewModuleScreen,
+    ReportScreen,
+    TestScreen,
+    ViewScreen,
+    WizardScreen,
+    XpathScreen,
+)
 from ocode.ui.screens.info import HoverScreen
 from ocode.ui.screens.server import ConfirmScreen, ServerSetupScreen, UpdateChooserScreen
 from ocode.ui.widgets.complete import CompletionPopup
@@ -43,6 +61,7 @@ from ocode.ui.widgets.findbar import FindBar
 from ocode.ui.widgets.logpanel import LogLinkClicked, LogPanel, level_badge
 from ocode.ui.widgets.problems import ProblemChosen, ProblemsPanel
 from ocode.ui.widgets.proj_tree import FilePicked, OdooTree
+from ocode.ui.widgets.shell import ShellExited, ShellPanel
 
 
 def build_default_commands() -> CommandRegistry:
@@ -85,6 +104,12 @@ def build_default_commands() -> CommandRegistry:
     reg.register("ocode.outline.show", "Outline/Symbols...", keybinding="ctrl+shift+o")
     reg.register("ocode.problem.next", "Next Problem", keybinding="f4")
     reg.register("ocode.problem.prev", "Previous Problem", keybinding="shift+f4")
+    reg.register("ocode.generate.menu", "Generate...", keybinding="ctrl+shift+n")
+    reg.register("ocode.shell.toggle", "Toggle Odoo Shell", keybinding="ctrl+`")
+    reg.register("ocode.shell.stop", "Stop Odoo Shell")
+    reg.register("ocode.shell.send", "Send to Shell", keybinding="ctrl+enter")
+    reg.register("ocode.shell.injectSelf", "Shell: self = env[current model]")
+    reg.register("ocode.snippet.insert", "Insert Snippet...")
     reg.register("ocode.app.quit", "Quit", keybinding="ctrl+q")
     return reg
 
@@ -121,6 +146,10 @@ class OcodeApp(App[None]):
         ("f4", "problem_next", "NextErr"),
         ("shift+f4", "problem_prev", "PrevErr"),
         ("ctrl+shift+o", "show_outline", "Outline"),
+        ("ctrl+shift+n", "generate_menu", "Generate"),
+        ("ctrl+`", "shell_toggle", "Shell"),
+        ("f7", "shell_toggle", "Shell"),
+        ("ctrl+enter", "shell_send", "Send"),
         ("ctrl+shift+p", "show_palette", "Palette"),
         ("f3", "find_next", "Next"),
         ("shift+f3", "find_prev", "Prev"),
@@ -158,10 +187,12 @@ class OcodeApp(App[None]):
         self.oki: OkiQuery | None = None
         self._index_progress: tuple[int, int] | None = None
         self.problems: list[Diagnostic] = []
-        self._bottom_mode = "logs"  # hidden | logs | problems
+        self._bottom_mode = "logs"  # hidden | logs | shell | problems
+        self.shell: ShellSession | None = None
         self._ref_targets: dict[str, tuple[str, int]] = {}
         self._fix_map: dict[str, tuple[Diagnostic, str]] = {}
         self._outline_map: dict[str, int] = {}
+        self._pending_changes: list[PlannedChange] = []
 
     # -- compose -------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -176,6 +207,7 @@ class OcodeApp(App[None]):
                 yield CompletionPopup(id="complete")
                 yield Static("", id="bottomtabs")
                 yield LogPanel(id="logs")
+                yield ShellPanel(id="shell")
                 yield ProblemsPanel(id="problems")
                 yield FindBar(id="findbar")
         yield Static("", id="statusbar")
@@ -208,10 +240,17 @@ class OcodeApp(App[None]):
         self.update_chrome()
         self.set_interval(5.0, self._autoswap)
         self.set_interval(1.0, self._poll_tailer)
+        self.set_interval(0.15, self._poll_shell)
         self.query_one("#editor", OcodeEditor).focus()
 
     def on_unmount(self) -> None:
         self._save_session()
+        if self.shell is not None:
+            try:
+                self.shell.stop()
+            except OSError:
+                pass
+            self.shell = None
         if self.oki_db is not None:
             try:
                 self.oki_db.close()
@@ -634,10 +673,12 @@ class OcodeApp(App[None]):
         try:
             logs = self.query_one("#logs", LogPanel)
             probs = self.query_one("#problems", ProblemsPanel)
+            shell = self.query_one("#shell", ShellPanel)
         except Exception:
             return
         logs.display = self._bottom_mode == "logs"
         probs.display = self._bottom_mode == "problems"
+        shell.display = self._bottom_mode == "shell"
         self._update_bottom_tabs()
 
     def _update_bottom_tabs(self) -> None:
@@ -647,12 +688,13 @@ class OcodeApp(App[None]):
             return
         errs = sum(1 for d in self.problems if d.severity == "error")
         logs_label = "[Logs]" if self._bottom_mode == "logs" else " Logs "
+        shell_label = "[Shell]" if self._bottom_mode == "shell" else " Shell "
         if self._bottom_mode == "problems":
             probs_label = f"[Problems:{errs}]"
         else:
             probs_label = f" Problems:{errs} "
         toggle = "Ctrl+J cycles"
-        tabs.update(f"{logs_label} {probs_label} ({toggle})")
+        tabs.update(f"{logs_label} {shell_label} {probs_label} ({toggle})")
 
     async def on_key(self, event: events.Key) -> None:
         if self._chord:
@@ -1062,9 +1104,11 @@ class OcodeApp(App[None]):
         self.update_chrome()
 
     def action_toggle_logs(self) -> None:
-        order = ["hidden", "logs", "problems"]
+        order = ["hidden", "logs", "shell", "problems"]
         self._bottom_mode = order[(order.index(self._bottom_mode) + 1) % len(order)]
         self._apply_bottom_mode()
+        if self._bottom_mode == "shell":
+            self._poll_shell()
 
     def action_log_clear(self) -> None:
         try:
@@ -1077,6 +1121,323 @@ class OcodeApp(App[None]):
     def _show_bottom(self, mode: str) -> None:
         self._bottom_mode = mode
         self._apply_bottom_mode()
+
+    # -- M5: generators (FR-OSG-001..013, Ctrl+Shift+N) ---------------------
+    def action_generate_menu(self) -> None:
+        labels = [title for _, title in GENERATORS]
+        base = self.start_path if self.start_path.is_dir() else self.start_path.parent
+        self.push_screen(FilterScreen("Generate (Ctrl+Shift+N)", labels, base),
+                         self._on_generate_pick)
+
+    def _on_generate_pick(self, picked: Path | None) -> None:
+        if picked is None:
+            return
+        label = picked.name
+        key = next((k for k, title in GENERATORS if title == label or title.startswith(label)), "")
+        if not key:
+            key = next((k for k, title in GENERATORS if label in title), "")
+        if key == "snippet":
+            self.action_snippet_insert()
+            return
+        if not key:
+            return
+        self._open_generator(key)
+
+    def _gen_ctx(self) -> tuple[str, str, str]:
+        """Return (module, model, version) for generator defaults."""
+        mod = self.current_module_name() or ""
+        model = ""
+        try:
+            st = self.active_state()
+            if st.doc.path is not None and st.doc.path.suffix == ".py":
+                model = self._model_at_cursor(st)
+        except Exception:
+            pass
+        version = self.project.version if self.project else "17.0"
+        return (mod, model, version or "17.0")
+
+    def _open_generator(self, key: str) -> None:
+        mod, model, version = self._gen_ctx()
+        from textual.screen import ModalScreen as _MS
+
+        screens: dict[str, _MS[list[PlannedChange] | None]] = {
+            "module": NewModuleScreen(version=f"{version}.1.0" if "." in version else version),
+            "model": ModelScreen(module=mod, version=version),
+            "inherit": InheritModelScreen(module=mod,
+                                          models=self.oki.models() if self.oki else []),
+            "view": ViewScreen(module=mod, model=model, version=version),
+            "xpath": XpathScreen(module=mod, model=model),
+            "access": AccessScreen(module=mod, model=model),
+            "groups": GroupsScreen(module=mod, model=model),
+            "wizard": WizardScreen(module=mod),
+            "report": ReportScreen(module=mod, model=model),
+            "controller": ControllerScreen(module=mod),
+            "cron": CronScreen(module=mod, model=model),
+            "test": TestScreen(module=mod, model=model),
+        }
+        screen = screens.get(key)
+        if screen is None:
+            return
+        self.push_screen(screen, self._on_generate_plan)
+
+    def _module_dir_for(self, key_module: str) -> Path | None:
+        if self.project:
+            for m in self.project.modules:
+                if m.name == key_module:
+                    return m.path
+        return None
+
+    def _on_generate_plan(self, changes: list[PlannedChange] | None) -> None:
+        if not changes:
+            return
+        rebased = self._rebase_changes(changes)
+        if not rebased:
+            return
+        diffs = "".join(preview_diff(c) for c in rebased)[:6000]
+        has_overwrite = any(c.action == "overwrite" for c in rebased)
+        self._pending_changes = rebased
+        self.push_screen(DiffScreen(f"Apply {len(rebased)} change(s)?", diffs, has_overwrite),
+                         self._on_generate_confirm)
+
+    def _rebase_changes(self, changes: list[PlannedChange]) -> list[PlannedChange]:
+        """Replace Path.cwd()/__PENDING__ placeholders with real module dirs."""
+        out: list[PlannedChange] = []
+        mod, _, _ = self._gen_ctx()
+        module_dir = self._module_dir_for(mod)
+        for c in changes:
+            text = str(c.path)
+            cwd = str(Path.cwd())
+            if "__PENDING__" in text:
+                if module_dir is None:
+                    self.notify("No current module — open a module file first",
+                                severity="warning")
+                    return []
+                text = text.replace(str(Path.cwd() / "__PENDING__"), str(module_dir))
+                text = text.replace("__PENDING__", str(module_dir))
+            elif text.startswith(cwd + "/") and c.detail.startswith("new module"):
+                parent = self._new_module_parent()
+                text = str(parent / Path(text).relative_to(cwd))
+            new_path = Path(text)
+            # never silently overwrite dirty open buffers
+            for doc in self.docs:
+                if doc.doc.path == new_path and doc.doc.dirty:
+                    self.notify(f"{new_path.name} has unsaved changes — save first",
+                                severity="warning")
+                    return []
+            out.append(PlannedChange(new_path, c.action, c.new_text, c.detail, c.old_text))
+        return out
+
+    def _new_module_parent(self) -> Path:
+        proj = self.project
+        if proj and proj.addons_paths:
+            return proj.addons_paths[-1]
+        base = self.start_path
+        return base if base.is_dir() else base.parent
+
+    def _on_generate_confirm(self, confirmed: bool | None) -> None:
+        changes = getattr(self, "_pending_changes", [])
+        self._pending_changes = []
+        if not confirmed or not changes:
+            return
+        try:
+            written = apply_changes(changes, allow_overwrite=True)
+        except OSError as exc:
+            self.notify(f"Generate failed: {exc}", severity="error")
+            return
+        for path in written:
+            self._reindex_path(path)
+        try:
+            if self.project:
+                self.query_one("#tree", OdooTree).set_project(self.project)
+        except Exception:
+            pass
+        self.refresh_diagnostics_for_active()
+        self.update_chrome()
+        first = next((p for p in written if p.suffix in (".py", ".xml")), None)
+        if first is not None:
+            self.open_path(first)
+            try:
+                self.query_one("#editor", OcodeEditor).focus()
+            except Exception:
+                pass
+        self.notify(f"Generated {len(written)} file(s)", timeout=3)
+
+    def action_snippet_insert(self) -> None:
+        labels = sorted(SNIPPETS)
+        base = self.start_path if self.start_path.is_dir() else self.start_path.parent
+        self.push_screen(FilterScreen("Insert Snippet", labels, base), self._on_snippet_pick)
+
+    def _on_snippet_pick(self, picked: Path | None) -> None:
+        if picked is None:
+            return
+        trigger = picked.name
+        if trigger not in SNIPPETS:
+            match = next((t for t in SNIPPETS if t.startswith(trigger)), None)
+            if match is None:
+                return
+            trigger = match
+        try:
+            editor = self.query_one("#editor", OcodeEditor)
+        except Exception:
+            return
+        body = expand_snippet(trigger, self.project.version if self.project else None)
+        if body is None:
+            return
+        text, _cursor = render_snippet(body)
+        editor.state.type_text(text)
+        editor.refresh()
+        self.update_chrome()
+        editor.focus()
+
+    # -- M5: embedded shell (FR-OSH-001..008, Ctrl+`) -----------------------
+    def _shell_profile(self) -> tuple[str, str, str, str] | None:
+        srv = self.server
+        if srv is None:
+            return None
+        p = srv.profile
+        return (p.odoo_bin, p.python, p.conf, p.db)
+
+    def action_shell_toggle(self) -> None:
+        if self.shell is not None and self.shell.alive:
+            # survive close/reopen: just hide the panel (FR-OSH-002)
+            if self._bottom_mode == "shell":
+                self._show_bottom("logs")
+            else:
+                self._show_bottom("shell")
+                try:
+                    self.query_one("#shell", ShellPanel).focus()
+                except Exception:
+                    pass
+            return
+        prof = self._shell_profile()
+        if prof is None:
+            self.notify("No server profile", severity="warning")
+            return
+        odoo_bin, python, conf, db = prof
+        if not odoo_bin:
+            self.notify("Set odoo-bin in Server Setup first", severity="warning")
+            return
+        if is_production_db(db):
+            self.push_screen(
+                ConfirmScreen(f"⚠ '{db}' looks like PRODUCTION. Start shell anyway?"),
+                lambda ok: self._start_shell_after_confirm(bool(ok)),
+            )
+            return
+        self._start_shell_after_confirm(True)
+
+    def _start_shell_after_confirm(self, ok: bool) -> None:
+        if not ok:
+            return
+        prof = self._shell_profile()
+        if prof is None:
+            return
+        odoo_bin, python, conf, db = prof
+        prog, argv = shell_command(odoo_bin, python, conf, db)
+        interface = ""
+        for fl in (self.server.profile.flags if self.server else []):
+            if fl.startswith("--shell-interface"):
+                interface = fl.split("=", 1)[1] if "=" in fl else ""
+        if interface:
+            prog, argv = shell_command(odoo_bin, python, conf, db, interface=interface)
+        session = ShellSession(db=db)
+        try:
+            session.start([prog, *argv])
+        except OSError as exc:
+            self.notify(f"Shell failed: {exc}", severity="error")
+            return
+        self.shell = session
+        try:
+            panel = self.query_one("#shell", ShellPanel)
+            panel.attach(session)
+        except Exception:
+            pass
+        self._show_bottom("shell")
+        try:
+            self.query_one("#shell", ShellPanel).focus()
+        except Exception:
+            pass
+        self.notify(f"$ {prog} {' '.join(argv[1:3])}…", timeout=3)
+        self.update_chrome()
+
+    def action_shell_stop(self) -> None:
+        if self.shell is not None:
+            try:
+                self.shell.stop()
+            except OSError:
+                pass
+            self.shell = None
+        try:
+            self.query_one("#shell", ShellPanel).detach()
+        except Exception:
+            pass
+        self._show_bottom("logs")
+        self.update_chrome()
+
+    def _poll_shell(self) -> None:
+        shell = self.shell
+        if shell is None or not shell.alive:
+            return
+        try:
+            shell.poll()
+        except OSError:
+            return
+        if self._bottom_mode != "shell":
+            return
+        try:
+            self.query_one("#shell", ShellPanel).refresh(layout=True)
+        except Exception:
+            pass
+
+    def action_shell_send(self) -> None:
+        shell = self.shell
+        if shell is None or not shell.alive:
+            self.notify("Shell not running — Ctrl+` to start", severity="warning")
+            return
+        try:
+            st = self.active_state()
+        except Exception:
+            return
+        text = st.selected_text() or st.lines()[st.cursor.line]
+        if not text.strip():
+            return
+        try:
+            shell.send(text)
+        except (OSError, RuntimeError) as exc:
+            self.notify(f"Send failed: {exc}", severity="error")
+            return
+        self._show_bottom("shell")
+        self.update_chrome()
+
+    def action_shell_inject_self(self) -> None:
+        shell = self.shell
+        if shell is None or not shell.alive:
+            self.notify("Shell not running — Ctrl+` to start", severity="warning")
+            return
+        model = ""
+        try:
+            model = self._model_at_cursor(self.active_state())
+        except Exception:
+            pass
+        if not model:
+            self.notify("No model at cursor", severity="warning")
+            return
+        try:
+            shell.send(f"self = env['{model}']")
+        except (OSError, RuntimeError) as exc:
+            self.notify(f"Send failed: {exc}", severity="error")
+            return
+        self._show_bottom("shell")
+
+    async def on_shell_exited(self, event: ShellExited) -> None:
+        _ = event
+        self.notify("Shell exited", timeout=3)
+        self.shell = None
+        try:
+            self.query_one("#shell", ShellPanel).detach()
+        except Exception:
+            pass
+        self._show_bottom("logs")
+        self.update_chrome()
 
     # -- M4: completion (FR-OMLS-010..018) --------------------------------
     def _completion_ctx(self) -> tuple[EditorState, int] | None:

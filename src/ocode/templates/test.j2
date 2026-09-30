@@ -1,0 +1,7 @@
+from odoo.tests import TransactionCase
+
+
+class {{ class_name }}(TransactionCase):
+    def test_create(self):
+        rec = self.env['{{ model }}'].create({'name': 'Test'})
+        self.assertTrue(rec.id)
