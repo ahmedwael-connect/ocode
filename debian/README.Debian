@@ -1,0 +1,20 @@
+Debian packaging notes (PRD §8.2)
+==============================
+
+Strategy: dh-virtualenv (private venv in /opt/ocode, symlink
+/usr/bin/ocode). Rationale: recent textual / pylint-odoo are not in
+Ubuntu archives (jammy/noble).
+
+Build (on Ubuntu 22.04/24.04, amd64/arm64)::
+
+    sudo apt install debhelper dh-virtualenv python3
+    dpkg-buildpackage -b -uc -us
+
+PPA publishing (not yet automated)::
+
+    dput ppa:<owner>/ocode ../ocode_1.0.0rc1-1_source.changes
+
+`debian/rules` must not require network access in postinst (policy).
+Completions install via dh_bashcompletion (compat 13 auto-detects
+completions/ocode.bash when named debian/ocode.bash-completion — rename
+on install if needed).

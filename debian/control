@@ -1,0 +1,21 @@
+Source: ocode
+Section: editors
+Priority: optional
+Maintainer: ocode contributors <dev@ocode.local>
+Build-Depends: debhelper-compat (= 13), dh-virtualenv, python3
+Standards-Version: 4.6.2
+Homepage: https://github.com/example/ocode
+
+Package: ocode
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: ripgrep, git
+Suggests: xclip | wl-clipboard
+Description: smart, Odoo-aware code editor for the terminal
+ ocode is a Textual-based TUI editor for Odoo developers: editing,
+ module navigation, server run/update/logs/shell, static Odoo
+ intelligence and boilerplate generators.
+ .
+ This package bundles its Python dependencies in a private virtualenv
+ (/opt/ocode) via dh-virtualenv, since recent Textual/pylint-odoo are
+ not in Ubuntu archives.

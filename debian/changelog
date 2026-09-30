@@ -1,0 +1,6 @@
+ocode (1.0.0rc1-1) unstable; urgency=medium
+
+  * M6 release candidate: help screen, doctor keys, man page,
+    completions, performance pass.
+
+ -- ocode contributors <dev@ocode.local>  Tue, 30 Sep 2026 00:00:00 +0000

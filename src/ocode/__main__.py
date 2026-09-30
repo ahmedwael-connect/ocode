@@ -22,6 +22,35 @@ def parse_position(target: str) -> tuple[Path, int | None, int | None]:
     return path, line, col
 
 
+_SUBCOMMANDS = ("doctor", "index", "init")
+_VALUE_OPTS = {"--conf", "--odoo-bin", "--db", "--log-level", "--config-dir"}
+
+
+def _extract_subcommand(raw: list[str]) -> tuple[str | None, list[str]]:
+    """Split off a leading subcommand without letting argparse eat paths.
+
+    Workaround for the classic nargs='?'-positional + subparsers conflict
+    (plain `ocode .` / `ocode file.py` must keep working).
+    """
+    skip_next = False
+    for i, tok in enumerate(raw):
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in _VALUE_OPTS:
+            skip_next = True
+            continue
+        if tok.startswith("-") and tok != "-":
+            if "=" not in tok:
+                # boolean flags take no value; unknown long opts: be lenient
+                continue
+            continue
+        if tok in _SUBCOMMANDS:
+            return tok, raw[:i] + raw[i + 1 :]
+        return None, raw
+    return None, raw
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ocode", description="Odoo-aware terminal editor")
     p.add_argument("path", nargs="?", default=".", help="file or folder to open")
@@ -31,15 +60,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-index", action="store_true", help="Disable background indexing")
     p.add_argument("--log-level", default="INFO")
     p.add_argument("--config-dir", help="Override config dir")
+    p.add_argument("--ascii", action="store_true", help="ASCII icons (no Nerd-Font glyphs)")
     p.add_argument("--version", action="store_true", help="Print version and exit")
-    sub = p.add_subparsers(dest="subcommand")
-    sub.add_parser("doctor", help="Environment diagnostics (FR-CLI-004)")
-    sub.add_parser("index", help="Rebuild index (stub until M4)")
-    sub.add_parser("init", help="Create workspace config (FR-CLI-004)")
+    p.add_argument("subcommand", nargs="?", default=None,
+                   help="doctor [keys] | index | init (also accepted as first positional)")
     return p
 
 
-def cmd_doctor() -> int:
+def cmd_doctor(check: str = "") -> int:
+    import os
+
     print(f"ocode {__version__} — doctor")
     print(f"python: {sys.version.split()[0]} on {platform.platform()}")
     for tool in ("rg", "git", "python3"):
@@ -50,6 +80,21 @@ def cmd_doctor() -> int:
         print(f"textual: {_t.__version__}")
     except ImportError:
         print("textual: MISSING (pip install textual)")
+    term = os.environ.get("TERM", "?")
+    colorterm = os.environ.get("COLORTERM", "")
+    kitty = bool(os.environ.get("KITTY_KEYBOARD") or "kitty" in term)
+    truecolor = colorterm.lower() in ("truecolor", "24bit") or "direct" in term or kitty
+    print(f"terminal: TERM={term} COLORTERM={colorterm or '—'} "
+          f"truecolor={'yes' if truecolor else 'no'} kitty-keys={'yes' if kitty else 'no'}")
+    if check == "keys":
+        print("keys: combos that may not reach the app without Kitty protocol:")
+        for combo, alt in (("Ctrl+Shift+P/M/F/N", "remap or use F-keys"),
+                           ("Alt+M / Alt+R", "Ctrl+K then M/R"),
+                           ("Ctrl+`", "F7 fallback"),
+                           ("Ctrl+Enter", "use shell panel input instead"),
+                           ("Ctrl+Space", "may be grabbed by IME/desktop")):
+            print(f"  {combo:22} → {alt}  (kitty: {'ok' if kitty else 'maybe lost'})")
+        return 0
     try:
         from ocode.engines.opd.detector import detect_project
 
@@ -94,8 +139,13 @@ def cmd_init(path: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import sys as _sys
+
+    raw = list(argv) if argv is not None else _sys.argv[1:]
+    # 'ocode doctor keys': keep 'doctor' from being eaten by the path positional
+    sub, rest = _extract_subcommand(raw)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(rest if sub is not None else raw)
 
     if args.version:
         print(__version__)
@@ -103,12 +153,16 @@ def main(argv: list[str] | None = None) -> int:
 
     log = setup_logging(args.log_level)
 
-    if args.subcommand == "doctor":
-        return cmd_doctor()
-    if args.subcommand == "init":
+    if sub is None and args.subcommand is not None:
+        parser.error(f"unexpected extra argument: {args.subcommand}")
+
+    if sub == "doctor":
+        check = args.path if args.path != "." else ""
+        return cmd_doctor(check if check == "keys" else "")
+    if sub == "init":
         target, _, _ = parse_position(args.path)
         return cmd_init(target.resolve())
-    if args.subcommand == "index":
+    if sub == "index":
         from ocode.engines.oki.db import OkiDb, index_path_for
         from ocode.engines.oki.indexer import Indexer
         from ocode.engines.oki.query import OkiQuery
@@ -139,6 +193,10 @@ def main(argv: list[str] | None = None) -> int:
     config_dir = Path(args.config_dir).expanduser() if args.config_dir else default_config_dir()
     workspace = start if start.is_dir() else start.parent
     config = load_config(workspace=workspace, config_dir=config_dir)
+    if args.ascii and isinstance(config.data.get("ui"), dict):
+        ui = config.data["ui"]
+        assert isinstance(ui, dict)
+        ui["ascii"] = True
     log.debug("open=%s line=%s col=%s conf=%s db=%s", start, line, col, args.conf, args.db)
 
     from ocode.app import OcodeApp

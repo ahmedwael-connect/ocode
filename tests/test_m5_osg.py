@@ -29,13 +29,13 @@ from ocode.engines.osg.scaffold import (
 )
 from ocode.engines.osg.specs import (
     AccessSpec,
+    CaseSpec,
     ControllerSpec,
     CronSpec,
     FieldSpec,
     ModelSpec,
     ModuleSpec,
     ReportSpec,
-    TestSpec,
     ViewSpec,
     WizardSpec,
     XpathSpec,
@@ -174,5 +174,5 @@ def test_more_scaffolds(tmp_path: Path) -> None:
     assert "http.route" in (mod / "controllers" / "main.py").read_text(encoding="utf-8")
     apply_changes(scaffold_cron(mod, CronSpec("m.cron", "m", "sale.order")))
     assert "ir.cron" in (mod / "data" / "cron.xml").read_text(encoding="utf-8")
-    apply_changes(scaffold_test(mod, TestSpec("m", "sale.order")))
+    apply_changes(scaffold_test(mod, CaseSpec("m", "sale.order")))
     assert "TransactionCase" in (mod / "tests" / "test_sale_order.py").read_text(encoding="utf-8")

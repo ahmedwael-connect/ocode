@@ -16,12 +16,12 @@ from ocode.engines.osg.naming import (
 from ocode.engines.osg.render import render_template, version_ctx
 from ocode.engines.osg.specs import (
     AccessSpec,
+    CaseSpec,
     ControllerSpec,
     CronSpec,
     ModelSpec,
     ModuleSpec,
     ReportSpec,
-    TestSpec,
     ViewSpec,
     WizardSpec,
     XpathSpec,
@@ -308,7 +308,7 @@ def scaffold_cron(module_dir: Path, spec: CronSpec) -> list[PlannedChange]:
     return changes
 
 
-def scaffold_test(module_dir: Path, spec: TestSpec) -> list[PlannedChange]:
+def scaffold_test(module_dir: Path, spec: CaseSpec) -> list[PlannedChange]:
     errs = spec.errors()
     if errs:
         raise ValueError("; ".join(errs))

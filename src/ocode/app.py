@@ -53,7 +53,7 @@ from ocode.ui.screens.generate import (
     WizardScreen,
     XpathScreen,
 )
-from ocode.ui.screens.info import HoverScreen
+from ocode.ui.screens.info import HelpScreen, HoverScreen
 from ocode.ui.screens.server import ConfirmScreen, ServerSetupScreen, UpdateChooserScreen
 from ocode.ui.widgets.complete import CompletionPopup
 from ocode.ui.widgets.editor import EditorSaved, OcodeEditor
@@ -193,6 +193,7 @@ class OcodeApp(App[None]):
         self._fix_map: dict[str, tuple[Diagnostic, str]] = {}
         self._outline_map: dict[str, int] = {}
         self._pending_changes: list[PlannedChange] = []
+        self._log_refresh_pending = False
 
     # -- compose -------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -391,6 +392,14 @@ class OcodeApp(App[None]):
         self.server.on_status(lambda _s: self.update_chrome())
 
     def _on_server_log(self) -> None:
+        # coalesce bursts (NFR-PERF-004: sustain 5k lines/s without UI stalls)
+        if self._log_refresh_pending:
+            return
+        self._log_refresh_pending = True
+        self.set_timer(0.1, self._flush_log_refresh)
+
+    def _flush_log_refresh(self) -> None:
+        self._log_refresh_pending = False
         try:
             panel = self.query_one("#logs", LogPanel)
         except Exception:
@@ -732,7 +741,7 @@ class OcodeApp(App[None]):
         self.notify("Command palette lands post-M2 (FR-CMD-001)", timeout=3)
 
     def action_show_help(self) -> None:
-        self.notify("F1 help screen lands post-M2 (UI-008)", timeout=3)
+        self.push_screen(HelpScreen(), lambda _x: None)
 
     def action_focus_tree(self) -> None:
         self.query_one("#tree", OdooTree).focus()

@@ -1,0 +1,82 @@
+.TH OCODE 1 "2026-09-30" "ocode 1.0.0rc1" "User Commands"
+.SH NAME
+ocode \- smart, Odoo-aware code editor for the terminal
+.SH SYNOPSIS
+.B ocode
+[\fIOPTIONS\fR] [\fIpath\fR]
+.br
+.B ocode doctor
+[\fBkeys\fR]
+.br
+.B ocode index
+.br
+.B ocode init
+[\fIpath\fR]
+.SH DESCRIPTION
+.B ocode
+is a terminal (Textual TUI) editor for Odoo developers: editing, module
+navigation, server run/update/logs/shell, static Odoo intelligence and
+boilerplate generators, over SSH or on headless servers.
+.SH OPTIONS
+.TP
+.BR path
+File or folder to open. \fBfile:line:col\fR jumps to a position.
+.TP
+.BR \-\-conf " " \fIFILE\fR
+Odoo config file override.
+.TP
+.BR \-\-odoo\-bin " " \fIFILE\fR
+Path to \fBodoo-bin\fR override.
+.TP
+.BR \-\-db " " \fINAME\fR
+Database name override.
+.TP
+.BR \-\-no\-index
+Disable background indexing.
+.TP
+.BR \-\-log\-level " " \fILEVEL\fR
+Log level (default INFO).
+.TP
+.BR \-\-config\-dir " " \fIDIR\fR
+Override config directory.
+.TP
+.BR \-\-ascii
+ASCII icons (no Nerd-Font glyphs).
+.TP
+.BR \-\-version
+Print version and exit.
+.SH COMMANDS
+.TP
+.B doctor
+Environment and project diagnostics. \fBdoctor keys\fR reports which key
+combinations the current terminal delivers.
+.TP
+.B index
+Rebuild the Odoo knowledge index (SQLite cache, safe to delete).
+.TP
+.B init
+Write \fB.ocode/config.toml\fR and \fB.ocode/servers.toml\fR stubs.
+.SH KEYS
+F1 help screen lists all bindings. Essentials: Ctrl+P quick open,
+Alt+M related file, F5/F6 server restart/start-stop, Ctrl+F5 update module,
+Ctrl+` shell, Ctrl+Shift+N generate, F8 lint, Ctrl+. quick fix, Ctrl+Q quit.
+.SH FILES
+.TP
+.I ~/.config/ocode/config.toml
+User configuration.
+.TP
+.I <workspace>/.ocode/servers.toml
+Server profiles.
+.TP
+.I ~/.config/ocode/templates/*.j2
+User template overrides.
+.TP
+.I ~/.cache/ocode/index/
+Knowledge index cache (safe to delete).
+.TP
+.I ~/.local/state/ocode/
+Sessions, swap files, shell history, logs.
+.SH "SEE ALSO"
+.BR odoo-bin (1),
+.BR rg (1),
+.BR pylint (1)

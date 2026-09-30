@@ -395,7 +395,7 @@ class TestScreen(_BaseGen):
         yield Input(placeholder="Model", value=self._model, id="f-model")
 
     def build(self) -> list[PlannedChange]:
-        from ocode.engines.osg.specs import TestSpec as _TS
+        from ocode.engines.osg.specs import CaseSpec as _TS
 
         spec = _TS(module=self._module, model=self.val("f-model") or self._model)
         return scaffold_test(Path.cwd() / "__PENDING__", spec)

@@ -1,0 +1,7 @@
+#!/usr/bin/make -f
+# dh-virtualenv strategy (PRD §8.2, recommended): private venv in /opt/ocode.
+%:
+	dh $@ --with python-virtualenv
+
+override_dh_virtualenv:
+	dh_virtualenv --python /usr/bin/python3 --extra-pip-arg "--no-cache-dir"

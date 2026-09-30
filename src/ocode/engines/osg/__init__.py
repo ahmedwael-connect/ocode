@@ -26,13 +26,13 @@ from ocode.engines.osg.scaffold import (
 )
 from ocode.engines.osg.specs import (
     AccessSpec,
+    CaseSpec,
     ControllerSpec,
     CronSpec,
     FieldSpec,
     ModelSpec,
     ModuleSpec,
     ReportSpec,
-    TestSpec,
     ViewSpec,
     WizardSpec,
     XpathSpec,
@@ -47,7 +47,7 @@ __all__ = [
     "ModuleSpec",
     "PlannedChange",
     "ReportSpec",
-    "TestSpec",
+    "CaseSpec",
     "ViewSpec",
     "WizardSpec",
     "XpathSpec",

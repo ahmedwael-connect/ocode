@@ -171,7 +171,7 @@ class CronSpec:
 
 
 @dataclass
-class TestSpec:
+class CaseSpec:
     module: str = ""
     model: str = ""
     class_name: str = "TestMyModel"
