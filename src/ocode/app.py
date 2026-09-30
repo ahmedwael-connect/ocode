@@ -15,6 +15,14 @@ from ocode.core.commands import CommandRegistry
 from ocode.core.config import OcodeConfig
 from ocode.core.events import EventBus
 from ocode.core.tasks import TaskScheduler
+from ocode.engines.git.repo import (
+    GitRepo,
+    Hunk,
+    blame_line,
+    diff_hunks,
+    find_repo,
+    repo_status,
+)
 from ocode.engines.oki.db import OkiDb, index_path_for
 from ocode.engines.oki.indexer import Indexer
 from ocode.engines.oki.query import OkiQuery
@@ -53,6 +61,7 @@ from ocode.ui.screens.generate import (
     WizardScreen,
     XpathScreen,
 )
+from ocode.ui.screens.git import GitCommitScreen
 from ocode.ui.screens.info import HelpScreen, HoverScreen
 from ocode.ui.screens.server import ConfirmScreen, ServerSetupScreen, UpdateChooserScreen
 from ocode.ui.widgets.complete import CompletionPopup
@@ -110,6 +119,8 @@ def build_default_commands() -> CommandRegistry:
     reg.register("ocode.shell.send", "Send to Shell", keybinding="ctrl+enter")
     reg.register("ocode.shell.injectSelf", "Shell: self = env[current model]")
     reg.register("ocode.snippet.insert", "Insert Snippet...")
+    reg.register("ocode.git.commit", "Git: Commit...", keybinding="ctrl+shift+g")
+    reg.register("ocode.git.blame", "Git: Toggle Blame Line", keybinding="ctrl+shift+b")
     reg.register("ocode.app.quit", "Quit", keybinding="ctrl+q")
     return reg
 
@@ -150,6 +161,8 @@ class OcodeApp(App[None]):
         ("ctrl+`", "shell_toggle", "Shell"),
         ("f7", "shell_toggle", "Shell"),
         ("ctrl+enter", "shell_send", "Send"),
+        ("ctrl+shift+g", "git_commit", "Commit"),
+        ("ctrl+shift+b", "git_blame", "Blame"),
         ("ctrl+shift+p", "show_palette", "Palette"),
         ("f3", "find_next", "Next"),
         ("shift+f3", "find_prev", "Prev"),
@@ -194,6 +207,11 @@ class OcodeApp(App[None]):
         self._outline_map: dict[str, int] = {}
         self._pending_changes: list[PlannedChange] = []
         self._log_refresh_pending = False
+        self._git_root: Path | None = None
+        self._git_status: GitRepo | None = None
+        self._git_hunks: list[Hunk] = []
+        self._blame_on = False
+        self._blame_cache: dict[tuple[str, int], str] = {}
 
     # -- compose -------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -242,6 +260,7 @@ class OcodeApp(App[None]):
         self.set_interval(5.0, self._autoswap)
         self.set_interval(1.0, self._poll_tailer)
         self.set_interval(0.15, self._poll_shell)
+        self.set_interval(2.0, self._poll_git)
         self.query_one("#editor", OcodeEditor).focus()
 
     def on_unmount(self) -> None:
@@ -540,6 +559,7 @@ class OcodeApp(App[None]):
         except Exception:
             return
         editor.state = self.active_state()
+        editor.hunks = list(self._git_hunks)
         editor.refresh()
         self.update_chrome()
 
@@ -622,8 +642,13 @@ class OcodeApp(App[None]):
             rel = Path(path.name)
         parts = list(rel.parts)
         if mod is not None:
-            return f"{mod.name} › {' › '.join(parts[-3:])}"
-        return " › ".join(parts[-4:])
+            text = f"{mod.name} › {' › '.join(parts[-3:])}"
+        else:
+            text = " › ".join(parts[-4:])
+        try:
+            return text + self._blame_suffix()
+        except OSError:
+            return text
 
     def update_chrome(self) -> None:
         try:
@@ -674,7 +699,7 @@ class OcodeApp(App[None]):
         segs = [f"{dot2} {fname}", lang, enc, eol, loc]
         if nmatch:
             segs.append(nmatch.strip(" |"))
-        tail = f"{odoo}{srv_txt}{badge}{idx_txt}{prob_txt}"
+        tail = f"{odoo}{srv_txt}{badge}{idx_txt}{prob_txt}{self._git_segment()}"
         status.update(" | ".join(segs) + tail)
         self._update_bottom_tabs()
 
@@ -951,6 +976,7 @@ class OcodeApp(App[None]):
         if event.path is not None:
             self._reindex_path(event.path)
             self.refresh_diagnostics_for_active()
+            self._poll_git()
         self.update_chrome()
         # auto-update current module on save (opt-in, FR-OSS-009)
         srv = self.server
@@ -1396,6 +1422,88 @@ class OcodeApp(App[None]):
             self.query_one("#shell", ShellPanel).refresh(layout=True)
         except Exception:
             pass
+
+    # -- M7: git (FR-GIT-001..005) ------------------------------------------
+    def _git_root_for_active(self) -> tuple[Path | None, Path | None]:
+        try:
+            path = self.active_state().doc.path
+        except Exception:
+            return (None, None)
+        if path is None:
+            return (None, None)
+        try:
+            return (find_repo(path), path)
+        except OSError:
+            return (None, None)
+
+    def _poll_git(self) -> None:
+        root, path = self._git_root_for_active()
+        if root is None or path is None:
+            if self._git_status is not None or self._git_hunks:
+                self._git_root, self._git_status, self._git_hunks = None, None, []
+                self.update_chrome()
+            return
+        try:
+            status = repo_status(root)
+            hunks = diff_hunks(root, path)
+        except OSError:
+            return
+        self._git_root, self._git_status, self._git_hunks = root, status, hunks
+        try:
+            editor = self.query_one("#editor", OcodeEditor)
+            if editor.hunks != hunks:
+                editor.hunks = hunks
+                editor.refresh()
+        except Exception:
+            pass
+        self.update_chrome()
+
+    def _git_segment(self) -> str:
+        status = self._git_status
+        if status is None:
+            return ""
+        dirty = "✱" if status.dirty else ""
+        return f" | {status.branch}{dirty}"
+
+    def _blame_suffix(self) -> str:
+        if not self._blame_on or self._git_root is None:
+            return ""
+        try:
+            st = self.active_state()
+            path = st.doc.path
+        except Exception:
+            return ""
+        if path is None:
+            return ""
+        key = (str(path), st.cursor.line + 1)
+        if key not in self._blame_cache:
+            try:
+                self._blame_cache[key] = blame_line(self._git_root, path, key[1])
+            except OSError:
+                return ""
+            if len(self._blame_cache) > 500:
+                self._blame_cache.clear()
+        info = self._blame_cache[key]
+        return f" | {info}" if info else ""
+
+    def action_git_blame(self) -> None:
+        self._blame_on = not self._blame_on
+        self.notify(f"Blame {'on' if self._blame_on else 'off'}", timeout=2)
+        self.update_chrome()
+
+    def action_git_commit(self) -> None:
+        root, _ = self._git_root_for_active()
+        if root is None:
+            self.notify("Not inside a git repo", severity="warning")
+            return
+        self.push_screen(GitCommitScreen(root), self._on_git_committed)
+
+    def _on_git_committed(self, ok: bool | None) -> None:
+        if ok:
+            self.notify("Committed", timeout=2)
+        elif ok is False:
+            self.notify("Commit failed", severity="error")
+        self._poll_git()
 
     def action_shell_send(self) -> None:
         shell = self.shell

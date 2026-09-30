@@ -13,6 +13,7 @@ from textual import events
 from textual.message import Message
 from textual.widget import Widget
 
+from ocode.engines.git.repo import Hunk
 from ocode.engines.ote.highlight import detect_language, highlight_lines
 from ocode.engines.ote.state import EditorState
 from ocode.ui.widgets.complete import CompletionPopup
@@ -45,6 +46,7 @@ class OcodeEditor(Widget, can_focus=True):
         self.left = 0
         self.show_line_numbers = True
         self._lang = "text"
+        self.hunks: list[Hunk] = []  # git diff gutter (M7)
 
     @property
     def cursor(self) -> tuple[int, int]:
@@ -60,6 +62,15 @@ class OcodeEditor(Widget, can_focus=True):
 
     def set_search_matches(self, line: int, col: int, length: int) -> None:
         _ = (line, col, length)
+
+    def _gutter_mark(self, lineno_1b: int) -> tuple[str, str]:
+        for h in self.hunks:
+            if h.kind == "del":
+                if lineno_1b == h.new_start:
+                    return ("-", "bold red")
+            elif h.new_start <= lineno_1b < h.new_start + h.new_count:
+                return ("+", "green") if h.kind == "add" else ("~", "yellow")
+        return (" ", "")
 
     # -- rendering -----------------------------------------------------
     def render(self) -> Text:
@@ -91,7 +102,7 @@ class OcodeEditor(Widget, can_focus=True):
             match_lines.setdefault(m.line, []).append((m.col, m.end - m.start))
 
         out = Text(no_wrap=True)
-        gutter_w = len(str(total)) + 1
+        gutter_w = len(str(total)) + 2  # marker + number
         for vi in range(height):
             li = self.top + vi
             if li >= total:
@@ -100,9 +111,12 @@ class OcodeEditor(Widget, can_focus=True):
             raw = lines[li].expandtabs(self.state.tab_width)
             vis = raw[self.left : self.left + width - gutter_w - 2]
             is_cur = li == cline
-            # gutter
-            gutter = f"{li + 1:>{gutter_w}} "
-            out.append(gutter, style="dim bold" if not is_cur else "bold yellow")
+            # gutter with git marker
+            marker, marker_style = self._gutter_mark(li + 1)
+            gutter = f"{marker}{li + 1:>{gutter_w - 1}} "
+            if marker == " ":
+                marker_style = "dim bold" if not is_cur else "bold yellow"
+            out.append(gutter, style=marker_style)
             base = len(out.plain)
             out.append(vis if vis else " ")
             # highlight spans
