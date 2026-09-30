@@ -15,6 +15,7 @@ from textual.widget import Widget
 
 from ocode.engines.ote.highlight import detect_language, highlight_lines
 from ocode.engines.ote.state import EditorState
+from ocode.ui.widgets.complete import CompletionPopup
 
 
 class EditorSaved(Message):
@@ -136,12 +137,51 @@ class OcodeEditor(Widget, can_focus=True):
         return out
 
     # -- key handling --------------------------------------------------
+    def _popup(self) -> object | None:
+        try:
+            pop = self.app.query_one("#complete", CompletionPopup)
+            return pop
+        except Exception:
+            return None
+
+    def _app_hook(self, name: str) -> object | None:
+        return getattr(self.app, name, None)
+
     async def on_key(self, event: events.Key) -> None:
         key = event.key
         st = self.state
         handled = True
 
-        if key == "ctrl+s":
+        # completion popup steals navigation/accept keys while open (M4)
+        pop = self._popup()
+        popup_open = bool(pop and getattr(pop, "is_open", False))
+        if popup_open and key in ("up", "down"):
+            move = getattr(pop, "move", None)
+            if callable(move):
+                move(-1 if key == "up" else 1)
+            event.prevent_default()
+            event.stop()
+            return
+        if popup_open and key in ("tab", "enter"):
+            accept = self._app_hook("accept_completion")
+            if callable(accept):
+                accept()
+            event.prevent_default()
+            event.stop()
+            return
+        if popup_open and key == "escape":
+            hide = getattr(pop, "hide", None)
+            if callable(hide):
+                hide()
+            event.prevent_default()
+            event.stop()
+            return
+
+        if key == "ctrl+space":
+            hook = self._app_hook("action_show_completion")
+            if callable(hook):
+                hook()
+        elif key == "ctrl+s":
             try:
                 path = st.save()
                 self.app.post_message(EditorSaved(path))
@@ -196,17 +236,23 @@ class OcodeEditor(Widget, can_focus=True):
         elif key == "delete":
             st.delete_forward()
         elif key == "tab":
-            st.indent(True)
+            expand = self._app_hook("try_expand_snippet")
+            if callable(expand) and expand():
+                pass
+            else:
+                st.indent(True)
         elif key == "shift+tab":
             st.indent(False)
         elif key == "space":
             st.type_text(" ")
+            self._after_printable(" ")
         elif event.is_printable:
             ch = event.character or ""
             if not ch and len(key) == 1:
                 ch = key
             if ch:
                 st.type_text(ch)
+                self._after_printable(ch)
             else:
                 handled = False
         else:
@@ -216,3 +262,8 @@ class OcodeEditor(Widget, can_focus=True):
             event.prevent_default()
             event.stop()
             self.refresh()
+
+    def _after_printable(self, ch: str) -> None:
+        hook = self._app_hook("after_edit_for_completion")
+        if callable(hook) and ch in ".[/\"'=<>_":
+            hook(ch)

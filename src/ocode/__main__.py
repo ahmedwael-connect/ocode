@@ -109,7 +109,28 @@ def main(argv: list[str] | None = None) -> int:
         target, _, _ = parse_position(args.path)
         return cmd_init(target.resolve())
     if args.subcommand == "index":
-        print("index: full indexer lands in M4 (FR-OKI-001)")
+        from ocode.engines.oki.db import OkiDb, index_path_for
+        from ocode.engines.oki.indexer import Indexer
+        from ocode.engines.oki.query import OkiQuery
+        from ocode.engines.opd.detector import detect_project
+
+        proj = detect_project(Path.cwd(), args.conf, args.odoo_bin)
+        if not proj.found or not proj.modules:
+            print("index: no Odoo project/modules detected here")
+            return 1
+        ws = proj.root or Path.cwd()
+        db = OkiDb(index_path_for(ws))
+        try:
+            stats = Indexer(db, list(proj.modules)).build(
+                progress=lambda i, n: print(f"\rindex: {i}/{n} files", end="", flush=True)
+            )
+            q = OkiQuery(db)
+            s = q.stats()
+        finally:
+            db.close()
+        print(f"\rindex: {stats.files} files, {s.get('models', 0)} models, "
+              f"{s.get('fields', 0)} fields, {s.get('xmlids', 0)} xml ids "
+              f"({stats.elapsed:.1f}s)")
         return 0
 
     target, line, col = parse_position(args.path)

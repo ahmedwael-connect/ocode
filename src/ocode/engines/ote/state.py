@@ -330,3 +330,24 @@ class EditorState:
 
     def save(self, path: Path | None = None) -> Path:
         return self.doc.save(path)
+
+    # -- completion helpers (M4) ---------------------------------------
+    def line_before_cursor(self) -> str:
+        cur = self.cursor
+        return self.lines()[cur.line][: cur.col]
+
+    def fragment(self) -> str:
+        m = re.search(r"[\w.]+$", self.line_before_cursor())
+        return m.group(0) if m else ""
+
+    def word_before_cursor(self) -> str:
+        m = re.search(r"[A-Za-z_]\w*$", self.line_before_cursor())
+        return m.group(0) if m else ""
+
+    def replace_fragment(self, insert: str) -> None:
+        frag = self.fragment()
+        if frag:
+            off = self.pos_to_offset(self.cursor)
+            self.doc.delete(off - len(frag), len(frag))
+            self.set_cursor(self.offset_to_pos(off - len(frag)))
+        self.type_text(insert)

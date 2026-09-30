@@ -36,6 +36,30 @@ Screen {
     display: none;
 }
 
+#bottomtabs {
+    background: #181825;
+    color: #a6adc8;
+    height: 1;
+}
+
+#problems {
+    background: #11111b;
+    border-top: solid #45475a;
+    height: 10;
+}
+
+#complete {
+    background: #313244;
+    border: solid #89b4fa;
+    height: auto;
+    max-height: 12;
+    display: none;
+}
+
+#complete.visible {
+    display: block;
+}
+
 #editor {
     background: #1e1e2e;
     height: 1fr;

@@ -1,0 +1,4 @@
+# Per-Odoo-version profile (M4). Drives deprecations + snippets + flag availability.
+version = "18.0"
+tree_tag = "list"   # <tree> removed; <list> required
+attrs_deprecated = true

@@ -15,6 +15,13 @@ from ocode.core.commands import CommandRegistry
 from ocode.core.config import OcodeConfig
 from ocode.core.events import EventBus
 from ocode.core.tasks import TaskScheduler
+from ocode.engines.oki.db import OkiDb, index_path_for
+from ocode.engines.oki.indexer import Indexer
+from ocode.engines.oki.query import OkiQuery
+from ocode.engines.omls.complete import complete_at
+from ocode.engines.omls.diagnostics import Diagnostic, FileCtx, analyze_file
+from ocode.engines.omls.quickfix import apply_fix, available_fixes
+from ocode.engines.omls.snippets import SNIPPETS, expand_snippet, render_snippet
 from ocode.engines.opd.detector import OdooProject, detect_project
 from ocode.engines.oss.manager import ServerManager
 from ocode.engines.oss.profiles import ServerProfile, default_profile, load_profiles, save_profiles
@@ -28,10 +35,13 @@ from ocode.engines.ses import CursorPos, SessionData, SessionManager
 from ocode.engines.smn.related import cycle_related, find_module_dir, key_file, related_files
 from ocode.engines.smn.search import ContentHit
 from ocode.ui.screens import FilterScreen, GrepScreen
+from ocode.ui.screens.info import HoverScreen
 from ocode.ui.screens.server import ConfirmScreen, ServerSetupScreen, UpdateChooserScreen
+from ocode.ui.widgets.complete import CompletionPopup
 from ocode.ui.widgets.editor import EditorSaved, OcodeEditor
 from ocode.ui.widgets.findbar import FindBar
 from ocode.ui.widgets.logpanel import LogLinkClicked, LogPanel, level_badge
+from ocode.ui.widgets.problems import ProblemChosen, ProblemsPanel
 from ocode.ui.widgets.proj_tree import FilePicked, OdooTree
 
 
@@ -65,6 +75,16 @@ def build_default_commands() -> CommandRegistry:
     reg.register("ocode.oss.setup", "Odoo: Server Profiles & Flags...")
     reg.register("ocode.view.toggleLogs", "Toggle Log Panel", keybinding="ctrl+j")
     reg.register("ocode.log.clear", "Clear Logs")
+    reg.register("ocode.complete.force", "Trigger Completion", keybinding="ctrl+space")
+    reg.register("ocode.fix.quick", "Quick Fix...", keybinding="ctrl+.")
+    reg.register("ocode.lint.file", "Lint Current File", keybinding="f8")
+    reg.register("ocode.lint.module", "Lint Current Module", keybinding="ctrl+f8")
+    reg.register("ocode.goto.definition", "Go to Definition", keybinding="f12")
+    reg.register("ocode.goto.references", "Find References", keybinding="shift+f12")
+    reg.register("ocode.hover.show", "Hover Info")
+    reg.register("ocode.outline.show", "Outline/Symbols...", keybinding="ctrl+shift+o")
+    reg.register("ocode.problem.next", "Next Problem", keybinding="f4")
+    reg.register("ocode.problem.prev", "Previous Problem", keybinding="shift+f4")
     reg.register("ocode.app.quit", "Quit", keybinding="ctrl+q")
     return reg
 
@@ -93,6 +113,14 @@ class OcodeApp(App[None]):
         ("f6", "server_toggle", "Start/Stop"),
         ("ctrl+f5", "server_update_current", "UpdCur"),
         ("ctrl+shift+f5", "server_update_choose", "Update"),
+        ("f8", "lint_file", "Lint"),
+        ("ctrl+f8", "lint_module", "LintMod"),
+        ("ctrl+.", "quick_fix", "Fix"),
+        ("f12", "goto_definition", "Def"),
+        ("shift+f12", "goto_references", "Refs"),
+        ("f4", "problem_next", "NextErr"),
+        ("shift+f4", "problem_prev", "PrevErr"),
+        ("ctrl+shift+o", "show_outline", "Outline"),
         ("ctrl+shift+p", "show_palette", "Palette"),
         ("f3", "find_next", "Next"),
         ("shift+f3", "find_prev", "Prev"),
@@ -126,6 +154,14 @@ class OcodeApp(App[None]):
         self.server_profiles: dict[str, ServerProfile] = {}
         self.server_profile_name = "dev"
         self._last_error_badge = ""
+        self.oki_db: OkiDb | None = None
+        self.oki: OkiQuery | None = None
+        self._index_progress: tuple[int, int] | None = None
+        self.problems: list[Diagnostic] = []
+        self._bottom_mode = "logs"  # hidden | logs | problems
+        self._ref_targets: dict[str, tuple[str, int]] = {}
+        self._fix_map: dict[str, tuple[Diagnostic, str]] = {}
+        self._outline_map: dict[str, int] = {}
 
     # -- compose -------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -137,7 +173,10 @@ class OcodeApp(App[None]):
                 yield Static("", id="breadcrumb")
                 yield Static("", id="tabbar")
                 yield OcodeEditor(EditorState(), id="editor")
+                yield CompletionPopup(id="complete")
+                yield Static("", id="bottomtabs")
                 yield LogPanel(id="logs")
+                yield ProblemsPanel(id="problems")
                 yield FindBar(id="findbar")
         yield Static("", id="statusbar")
         yield Footer()
@@ -164,6 +203,8 @@ class OcodeApp(App[None]):
         if pending:
             self.notify(f"{len(pending)} swap file(s) found — recovery available", timeout=5)
         self._init_server(ws)
+        self._apply_bottom_mode()
+        self._init_oki(ws)
         self.update_chrome()
         self.set_interval(5.0, self._autoswap)
         self.set_interval(1.0, self._poll_tailer)
@@ -171,6 +212,12 @@ class OcodeApp(App[None]):
 
     def on_unmount(self) -> None:
         self._save_session()
+        if self.oki_db is not None:
+            try:
+                self.oki_db.close()
+            except OSError:
+                pass
+            self.oki_db = None
         srv = self.server
         if srv is not None and srv.proc.running:
             try:
@@ -181,6 +228,93 @@ class OcodeApp(App[None]):
                     loop.create_task(srv.stop())
             except (OSError, RuntimeError):
                 pass
+
+    # -- OKI index (FR-OKI-001..004, background, incremental) ------------
+    def _init_oki(self, ws: Path) -> None:
+        proj = self.project
+        if not proj or not proj.modules:
+            return
+        try:
+            db_path = index_path_for(ws)
+        except OSError:
+            return
+        mods = list(proj.modules)
+        self._index_progress = (0, len(mods))
+
+        def _build() -> tuple[str, dict[str, int]]:
+            db = OkiDb(db_path)
+            try:
+                stats = Indexer(db, mods).build(
+                    progress=lambda i, n: self.call_from_thread(self._on_index_progress, i, n)
+                )
+                return (str(db_path), {"files": stats.files, "models": stats.models,
+                                       "fields": stats.fields, "xmlids": stats.xmlids})
+            finally:
+                db.close()
+
+        handle = self.scheduler.run_in_thread("oki-index", _build)
+        # done-callbacks run in the app thread: call directly (no call_from_thread)
+        handle.task.add_done_callback(lambda _t: self._on_index_done(str(db_path)))
+
+    def _on_index_progress(self, i: int, total: int) -> None:
+        self._index_progress = (i, total)
+        self.update_chrome()
+
+    def _on_index_done(self, db_path: str) -> None:
+        self._index_progress = None
+        try:
+            self.oki_db = OkiDb(Path(db_path))
+            self.oki = OkiQuery(self.oki_db)
+        except OSError as exc:
+            self.notify(f"Index unavailable: {exc}", severity="warning")
+            return
+        stats = self.oki.stats()
+        self.notify(
+            f"Indexed {stats.get('models', 0)} models, {stats.get('fields', 0)} fields",
+            timeout=3,
+        )
+        self.refresh_diagnostics_for_active()
+        self.update_chrome()
+
+    def _file_ctx_for(self, path: Path) -> FileCtx:
+        from ocode.engines.opd.module import read_manifest
+
+        proj = self.project
+        mod = find_module_dir(path, proj.modules) if proj else None
+        manifest: dict[str, object] = {}
+        files: list[str] = []
+        if mod is not None:
+            try:
+                manifest = read_manifest(mod.manifest_path)
+            except OSError:
+                manifest = {}
+            try:
+                all_files = [p for p in mod.path.rglob("*") if p.is_file()][:2000]
+                files = [str(p.relative_to(mod.path)) for p in all_files]
+            except OSError:
+                files = []
+        version = proj.version if proj else None
+        return FileCtx(path, mod, manifest, files, self.oki, version, {})
+
+    def refresh_diagnostics_for_active(self) -> None:
+        try:
+            st = self.active_state()
+        except Exception:
+            return
+        if st.doc.path is None:
+            return
+        try:
+            text = st.doc.text
+            ctx = self._file_ctx_for(st.doc.path)
+            diags = analyze_file(text, ctx)
+        except OSError:
+            return
+        # keep other files' diags, replace this file's
+        self.problems = [d for d in self.problems if d.file != str(st.doc.path)] + diags
+        try:
+            self.query_one("#problems", ProblemsPanel).set_items(self.problems)
+        except Exception:
+            pass
 
     # -- server --------------------------------------------------------
     def _init_server(self, ws: Path) -> None:
@@ -480,8 +614,45 @@ class OcodeApp(App[None]):
             odoo = f" | odoo {self.project.version or '?'} | db: {db}"
         srv_txt = f" | {self._server_status_text()}"
         badge = f" | {self._last_error_badge}" if self._last_error_badge else ""
-        info = f"{dot2} {fname} | {lang} | {enc} | {eol} | {loc}{nmatch}{odoo}{srv_txt}{badge}"
-        status.update(info)
+        idx_txt = ""
+        if self._index_progress is not None:
+            i, n = self._index_progress
+            idx_txt = f" | indexing {i}/{n}"
+        prob_txt = ""
+        if self.problems:
+            errs = sum(1 for d in self.problems if d.severity == "error")
+            warns = sum(1 for d in self.problems if d.severity == "warning")
+            prob_txt = f" | E:{errs} W:{warns}"
+        segs = [f"{dot2} {fname}", lang, enc, eol, loc]
+        if nmatch:
+            segs.append(nmatch.strip(" |"))
+        tail = f"{odoo}{srv_txt}{badge}{idx_txt}{prob_txt}"
+        status.update(" | ".join(segs) + tail)
+        self._update_bottom_tabs()
+
+    def _apply_bottom_mode(self) -> None:
+        try:
+            logs = self.query_one("#logs", LogPanel)
+            probs = self.query_one("#problems", ProblemsPanel)
+        except Exception:
+            return
+        logs.display = self._bottom_mode == "logs"
+        probs.display = self._bottom_mode == "problems"
+        self._update_bottom_tabs()
+
+    def _update_bottom_tabs(self) -> None:
+        try:
+            tabs = self.query_one("#bottomtabs", Static)
+        except Exception:
+            return
+        errs = sum(1 for d in self.problems if d.severity == "error")
+        logs_label = "[Logs]" if self._bottom_mode == "logs" else " Logs "
+        if self._bottom_mode == "problems":
+            probs_label = f"[Problems:{errs}]"
+        else:
+            probs_label = f" Problems:{errs} "
+        toggle = "Ctrl+J cycles"
+        tabs.update(f"{logs_label} {probs_label} ({toggle})")
 
     async def on_key(self, event: events.Key) -> None:
         if self._chord:
@@ -495,6 +666,11 @@ class OcodeApp(App[None]):
                 event.prevent_default()
                 event.stop()
                 self.action_related_popup()
+                return
+            if event.key in ("i", "I"):
+                event.prevent_default()
+                event.stop()
+                self.action_show_hover()
                 return
         if event.key in ("f3", "shift+f3"):
             return
@@ -721,6 +897,9 @@ class OcodeApp(App[None]):
         if self._swap is not None:
             self._swap.clear()
         self.notify(f"Saved {event.path}" if event.path else "Saved", timeout=2)
+        if event.path is not None:
+            self._reindex_path(event.path)
+            self.refresh_diagnostics_for_active()
         self.update_chrome()
         # auto-update current module on save (opt-in, FR-OSS-009)
         srv = self.server
@@ -729,11 +908,8 @@ class OcodeApp(App[None]):
         mod = self.current_module_name()
         if mod is None:
             return
-        if srv.profile.lint_before_restart == "block":
-            self.notify("lint gate: no linter yet (M4) — update skipped", severity="warning")
+        if not self._lint_gate([mod]):
             return
-        if srv.profile.lint_before_restart == "warn":
-            self.notify("lint gate: warn (no linter yet, M4)", timeout=2)
         self.notify(f"Auto-updating {mod}…", timeout=2)
         try:
             await srv.restart_update([mod])
@@ -761,10 +937,16 @@ class OcodeApp(App[None]):
         srv = self.server
         if srv is None:
             return
+        if not self._lint_gate(self._gate_modules()):
+            return
         self.notify(f"$ {srv.preview()}", timeout=4)
         await srv.restart()
         self._report_server_hint()
         self.update_chrome()
+
+    def _gate_modules(self) -> list[str]:
+        mod = self.current_module_name()
+        return [mod] if mod else []
 
     async def action_server_update_current(self) -> None:
         srv = self.server
@@ -773,6 +955,8 @@ class OcodeApp(App[None]):
         mod = self.current_module_name()
         if mod is None:
             self.notify("No current module to update", severity="warning")
+            return
+        if not self._lint_gate([mod]):
             return
         self.notify(f"Restart + update {mod}…", timeout=3)
         await srv.restart_update([mod])
@@ -793,6 +977,8 @@ class OcodeApp(App[None]):
             return
         if "all" in mods:
             self.push_screen(ConfirmScreen("Update ALL modules? (-u all)"), self._on_update_all)
+            return
+        if not self._lint_gate(mods):
             return
         srv = self.server
         if srv is None:
@@ -876,13 +1062,9 @@ class OcodeApp(App[None]):
         self.update_chrome()
 
     def action_toggle_logs(self) -> None:
-        try:
-            panel = self.query_one("#logs", LogPanel)
-        except Exception:
-            return
-        panel.display = not panel.display
-        if panel.display:
-            panel.refresh(layout=True)
+        order = ["hidden", "logs", "problems"]
+        self._bottom_mode = order[(order.index(self._bottom_mode) + 1) % len(order)]
+        self._apply_bottom_mode()
 
     def action_log_clear(self) -> None:
         try:
@@ -891,6 +1073,658 @@ class OcodeApp(App[None]):
             pass
         self._last_error_badge = ""
         self.update_chrome()
+
+    def _show_bottom(self, mode: str) -> None:
+        self._bottom_mode = mode
+        self._apply_bottom_mode()
+
+    # -- M4: completion (FR-OMLS-010..018) --------------------------------
+    def _completion_ctx(self) -> tuple[EditorState, int] | None:
+        try:
+            editor = self.query_one("#editor", OcodeEditor)
+        except Exception:
+            return None
+        st = editor.state
+        return (st, st.pos_to_offset(st.cursor))
+
+    def action_show_completion(self) -> None:
+        if self.oki is None:
+            self.notify("Index not ready yet", timeout=2)
+            return
+        found = self._completion_ctx()
+        if found is None:
+            return
+        st, offset = found
+        items = complete_at(st.doc.path, st.doc.text, offset, self.oki,
+                            self.current_module_name(),
+                            self.project.version if self.project else None)
+        if not items:
+            self.notify("No completions", timeout=1)
+            return
+        try:
+            self.query_one("#complete", CompletionPopup).show(items)
+        except Exception:
+            pass
+
+    def after_edit_for_completion(self, _ch: str) -> None:
+        if self.oki is None:
+            return
+        try:
+            pop = self.query_one("#complete", CompletionPopup)
+            if pop.is_open:
+                self.action_show_completion()
+                return
+        except Exception:
+            return
+        found = self._completion_ctx()
+        if found is None:
+            return
+        st, offset = found
+        if len(st.fragment()) < 2:
+            return
+        items = complete_at(st.doc.path, st.doc.text, offset, self.oki,
+                            self.current_module_name(),
+                            self.project.version if self.project else None)
+        if items:
+            try:
+                self.query_one("#complete", CompletionPopup).show(items)
+            except Exception:
+                pass
+
+    def accept_completion(self) -> None:
+        try:
+            pop = self.query_one("#complete", CompletionPopup)
+            editor = self.query_one("#editor", OcodeEditor)
+        except Exception:
+            return
+        cur = pop.current()
+        if cur is None:
+            pop.hide()
+            return
+        pop.hide()
+        st = editor.state
+        if cur.kind == "snippet":
+            body = expand_snippet(cur.insert,
+                                  self.project.version if self.project else None)
+            if body is None:
+                st.replace_fragment(cur.insert)
+            else:
+                text, _cursor = render_snippet(body)
+                word = st.word_before_cursor()
+                if word:
+                    off = st.pos_to_offset(st.cursor)
+                    st.doc.delete(off - len(word), len(word))
+                    st.set_cursor(st.offset_to_pos(off - len(word)))
+                st.type_text(text)
+        else:
+            st.replace_fragment(cur.insert)
+        editor.refresh()
+        self.update_chrome()
+
+    async def on_completion_accepted(self, event: object) -> None:
+        _ = event
+        self.accept_completion()
+
+    def try_expand_snippet(self) -> bool:
+        try:
+            editor = self.query_one("#editor", OcodeEditor)
+        except Exception:
+            return False
+        st = editor.state
+        word = st.word_before_cursor()
+        if word not in SNIPPETS:
+            return False
+        body = expand_snippet(word, self.project.version if self.project else None)
+        if body is None:
+            return False
+        text, _cursor = render_snippet(body)
+        off = st.pos_to_offset(st.cursor)
+        st.doc.delete(off - len(word), len(word))
+        st.set_cursor(st.offset_to_pos(off - len(word)))
+        st.type_text(text)
+        editor.refresh()
+        self.update_chrome()
+        return True
+
+    # -- M4: diagnostics + lint (FR-OMLS-020..025, 030..034) ---------------
+    def action_lint_file(self) -> None:
+        try:
+            st = self.active_state()
+        except Exception:
+            return
+        if st.doc.path is None:
+            return
+        try:
+            ctx = self._file_ctx_for(st.doc.path)
+            diags = analyze_file(st.doc.text, ctx)
+        except OSError:
+            return
+        self.problems = [d for d in self.problems if d.file != str(st.doc.path)] + diags
+        try:
+            self.query_one("#problems", ProblemsPanel).set_items(self.problems)
+        except Exception:
+            pass
+        self._show_bottom("problems")
+        self.update_chrome()
+        self.scheduler.run_in_thread("pylint-file", self._pylint_file_sync, st.doc.path)
+
+    def _pylint_file_sync(self, path: Path) -> None:
+        from ocode.engines.omls.pylint import pylint_available, run_pylint_odoo
+
+        ok, hint = pylint_available()
+        if not ok:
+            self.call_from_thread(self.notify, hint, {"timeout": 4})
+            return
+        version = self.project.version if self.project else None
+        res = run_pylint_odoo([path], version)
+        if res.diagnostics:
+            self.call_from_thread(self._merge_pylint, res.diagnostics)
+
+    def _merge_pylint(self, diags: list[Diagnostic]) -> None:
+        files = {d.file for d in diags}
+        self.problems = [d for d in self.problems
+                         if d.file not in files or d.code != "PYLINT"]
+        self.problems += diags
+        try:
+            self.query_one("#problems", ProblemsPanel).set_items(self.problems)
+        except Exception:
+            pass
+        self.update_chrome()
+
+    def action_lint_module(self) -> None:
+        mod = self._current_module()
+        if mod is None:
+            self.notify("No current module", severity="warning")
+            return
+        from ocode.engines.opd.module import ModuleInfo as MI
+
+        assert isinstance(mod, MI)
+        files: dict[str, str] = {}
+        try:
+            for p in mod.path.rglob("*"):
+                if p.is_file() and p.suffix in (".py", ".xml") and len(files) < 300:
+                    try:
+                        files[str(p.relative_to(mod.path))] = p.read_text(encoding="utf-8")
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+        from ocode.engines.omls.diagnostics import analyze_module
+
+        diags = analyze_module(mod, files, self.oki,
+                               self.project.version if self.project else None)
+        prefix = str(mod.path)
+        self.problems = [d for d in self.problems if not d.file.startswith(prefix)] + diags
+        try:
+            self.query_one("#problems", ProblemsPanel).set_items(self.problems)
+        except Exception:
+            pass
+        self._show_bottom("problems")
+        errs = sum(1 for d in diags if d.severity == "error")
+        self.notify(f"Module lint: {len(diags)} issues ({errs} errors)", timeout=3)
+        self.update_chrome()
+
+    def _lint_gate(self, modules: list[str]) -> bool:
+        """Lint-before-restart gate (FR-OMLS-032). Returns True to proceed."""
+        srv = self.server
+        if srv is None or srv.profile.lint_before_restart == "off":
+            return True
+        errs: list[Diagnostic] = []
+        for doc in self.docs:
+            if doc.doc.path is None:
+                continue
+            mod_name = self._module_of(doc.doc.path)
+            if mod_name is None or (modules != ["all"] and mod_name not in modules):
+                continue
+            try:
+                ctx = self._file_ctx_for(doc.doc.path)
+                errs += [d for d in analyze_file(doc.doc.text, ctx) if d.severity == "error"]
+            except OSError:
+                continue
+        if not errs:
+            return True
+        self.problems = errs + [d for d in self.problems if d.severity != "error"]
+        try:
+            self.query_one("#problems", ProblemsPanel).set_items(self.problems)
+        except Exception:
+            pass
+        self._show_bottom("problems")
+        if srv.profile.lint_before_restart == "block":
+            self.notify(f"Lint gate: {len(errs)} error(s) — restart blocked", severity="error")
+            return False
+        self.notify(f"Lint gate: {len(errs)} error(s) — proceeding (warn)", severity="warning")
+        return True
+
+    def _module_of(self, path: Path) -> str | None:
+        if not self.project:
+            return None
+        mod = find_module_dir(path, self.project.modules)
+        return mod.name if mod else None
+
+    # -- M4: quick fixes (FR-OMLS-024, Ctrl+.) ------------------------------
+    def action_quick_fix(self) -> None:
+        try:
+            st = self.active_state()
+        except Exception:
+            return
+        if st.doc.path is None:
+            return
+        line = st.cursor.line + 1
+        cands = [d for d in self.problems
+                 if d.file == str(st.doc.path) and abs(d.line - line) <= 1]
+        if not cands:
+            try:
+                ctx = self._file_ctx_for(st.doc.path)
+                cands = [d for d in analyze_file(st.doc.text, ctx) if abs(d.line - line) <= 1]
+            except OSError:
+                return
+        options: list[tuple[str, Diagnostic]] = []
+        for d in cands:
+            for _fix_id, title in available_fixes(d):
+                options.append((f"{title} [{d.code}]", d))
+        if not options:
+            self.notify("No quick fixes here", timeout=2)
+            return
+        labels = [t for t, _ in options]
+        self._fix_map = {}
+        for (title, diag) in options:
+            for fix_id, _ in available_fixes(diag):
+                self._fix_map[title] = (diag, fix_id)
+                break
+        base = st.doc.path.parent
+        self.push_screen(FilterScreen("Quick Fix (Ctrl+.)", labels, base), self._on_fix_pick)
+
+    def _on_fix_pick(self, picked: Path | None) -> None:
+        if picked is None or not self._fix_map:
+            return
+        label = picked.name
+        match = next((t for t in self._fix_map if t == label or t.startswith(label)), None)
+        if match is None:
+            match = next(iter(self._fix_map))
+        diag, fix_id = self._fix_map[match]
+        self.apply_quickfix(diag, fix_id)
+
+    def apply_quickfix(self, diag: Diagnostic, fix_id: str) -> None:
+        kind = fix_id.split(":")[0]
+        payload = fix_id.split(":", 1)[1] if ":" in fix_id else ""
+        if kind in ("manifest-data", "manifest-depends"):
+            target = self._manifest_for_diag()
+            if target is not None:
+                self._apply_fix_to_file(target, fix_id, payload)
+                return
+        if kind == "access-row":
+            target = self._access_file_for_diag()
+            if target is not None:
+                self._apply_fix_to_file(target, fix_id, payload)
+                return
+        if kind in ("init-import", "init-import-models"):
+            target = self._init_file_for_diag(diag, kind)
+            if target is not None:
+                self._apply_fix_to_file(target, fix_id, payload)
+                return
+        try:
+            editor = self.query_one("#editor", OcodeEditor)
+        except Exception:
+            return
+        st = editor.state
+        st.doc.history.begin_group()
+        try:
+            new_text, applied = apply_fix(fix_id, st.doc.text, payload)
+            if applied:
+                st.doc.delete(0, len(st.doc.text))
+                st.doc.insert(0, new_text)
+        finally:
+            st.doc.history.end_group()
+        editor.refresh()
+        self.refresh_diagnostics_for_active()
+        self.update_chrome()
+
+    def _manifest_for_diag(self) -> Path | None:
+        mod = self._current_module()
+        if mod is None:
+            return None
+        from ocode.engines.opd.module import ModuleInfo as MI
+
+        assert isinstance(mod, MI)
+        return mod.manifest_path
+
+    def _access_file_for_diag(self) -> Path | None:
+        mod = self._current_module()
+        if mod is None:
+            return None
+        from ocode.engines.opd.module import ModuleInfo as MI
+
+        assert isinstance(mod, MI)
+        target = mod.path / "security" / "ir.model.access.csv"
+        if not target.exists():
+            header = (
+                "id,name,model_id:id,group_id:id,"
+                "perm_read,perm_write,perm_create,perm_unlink\n"
+            )
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(header, encoding="utf-8")
+            except OSError:
+                return None
+        return target
+
+    def _init_file_for_diag(self, diag: Diagnostic, kind: str) -> Path | None:
+        mod = self._current_module()
+        if mod is None:
+            return None
+        from ocode.engines.opd.module import ModuleInfo as MI
+
+        assert isinstance(mod, MI)
+        if kind == "init-import-models":
+            return mod.path / "__init__.py"
+        cur = Path(diag.file).parent / "__init__.py"
+        return cur if cur.parent.name == "models" else mod.path / "models" / "__init__.py"
+
+    def _apply_fix_to_file(self, target: Path, fix_id: str, payload: str) -> None:
+        kind = fix_id.split(":")[0]
+        if kind == "init-import" and not payload:
+            payload = self._guess_init_stem(target)
+        opened_here = False
+        state = next((d for d in self.docs if d.doc.path == target), None)
+        if state is None:
+            try:
+                text = target.read_text(encoding="utf-8") if target.exists() else ""
+            except OSError:
+                return
+            from ocode.engines.ote.document import Document as _Doc
+
+            state = EditorState(_Doc(path=target, text=text))
+            opened_here = True
+        new_text, applied = apply_fix(fix_id, state.doc.text, payload)
+        if not applied:
+            self.notify("Fix not applicable", timeout=2)
+            return
+        if opened_here:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(new_text, encoding="utf-8")
+            except OSError as exc:
+                self.notify(f"Cannot write {target}: {exc}", severity="error")
+                return
+            self._reindex_path(target)
+            self.notify(f"Fixed {target.name}", timeout=2)
+        else:
+            state.doc.history.begin_group()
+            try:
+                state.doc.delete(0, len(state.doc.text))
+                state.doc.insert(0, new_text)
+                state.save()
+            except (OSError, ValueError, PermissionError) as exc:
+                self.notify(f"Cannot save: {exc}", severity="error")
+                return
+            finally:
+                state.doc.history.end_group()
+            try:
+                self.query_one("#editor", OcodeEditor).refresh()
+            except Exception:
+                pass
+            self._reindex_path(target)
+        self.refresh_diagnostics_for_active()
+        self.update_chrome()
+
+    def _guess_init_stem(self, init_path: Path) -> str:
+        for d in self.problems:
+            if d.code == "ODOO007" and Path(d.file).parent == init_path.parent:
+                import re as _re
+
+                m = _re.search(r"'(\w+)' not imported", d.message)
+                if m:
+                    return m.group(1)
+        try:
+            cands = sorted(init_path.parent.glob("*.py"))
+            for c in reversed(cands):
+                if c.name != "__init__.py":
+                    return c.stem
+        except OSError:
+            pass
+        return ""
+
+    def _reindex_path(self, path: Path) -> None:
+        if not self.project or path.suffix not in (".py", ".xml", ".csv"):
+            return
+        try:
+            ws = self.project.root if self.project.root else path.parent
+            db = OkiDb(index_path_for(ws))
+            try:
+                Indexer(db, list(self.project.modules)).update_file(path)
+            finally:
+                db.close()
+        except OSError:
+            pass
+        if self.oki_db is not None:
+            try:
+                self.oki_db.close()
+            except OSError:
+                pass
+            try:
+                ws = self.project.root if self.project.root else path.parent
+                self.oki_db = OkiDb(index_path_for(ws))
+                self.oki = OkiQuery(self.oki_db)
+            except OSError:
+                self.oki = None
+
+    # -- M4: hover / outline / goto (FR-OTE-080/082, SMN-023) ----------------
+    def action_show_hover(self) -> None:
+        if self.oki is None:
+            self.notify("Index not ready yet", timeout=2)
+            return
+        try:
+            st = self.active_state()
+        except Exception:
+            return
+        frag = st.fragment() or st.word_before_cursor()
+        if not frag:
+            self.notify("Nothing under cursor", timeout=2)
+            return
+        title, body = self._hover_for(frag, st)
+        self.push_screen(HoverScreen(title, body), lambda _x: None)
+
+    def _hover_for(self, frag: str, st: EditorState) -> tuple[str, str]:
+        assert self.oki is not None
+        base = frag.split(".")[-1]
+        if frag in self.oki.models():
+            fields = self.oki.merged_fields(frag)
+            mods = self.oki.model_modules(frag)
+            lines = [f"Model {frag} — {len(fields)} fields ({', '.join(mods[:5])})"]
+            for name, finfo in sorted(fields.items())[:15]:
+                lines.append(f"  {name}: {finfo.get('type', '')} {finfo.get('string', '')}")
+            if len(fields) > 15:
+                lines.append(f"  … +{len(fields) - 15} more")
+            return (frag, "\n".join(lines))
+        model = self._model_at_cursor(st)
+        if model and base in self.oki.merged_fields(model):
+            finfo = self.oki.merged_fields(model)[base]
+            body = (f"{model}.{base}\ntype={finfo.get('type', '')} "
+                    f"comodel={finfo.get('comodel', '')} required={finfo.get('required', False)}\n"
+                    f"string={finfo.get('string', '')} module={finfo.get('module', '')}")
+            return (base, body)
+        if "." in frag and self.oki.xmlid_exists(frag):
+            return (frag, f"XML ID {frag} — defined in index.")
+        return (frag, "No documentation found in index.")
+
+    def _model_at_cursor(self, st: EditorState) -> str:
+        import re as _re
+
+        before = st.doc.text[: st.pos_to_offset(st.cursor)]
+        names = _re.findall(r"_name\s*=\s*['\"]([\w.]+)['\"]", before)
+        return names[-1] if names else ""
+
+    def action_show_outline(self) -> None:
+        try:
+            st = self.active_state()
+        except Exception:
+            return
+        if st.doc.path is None:
+            return
+        suffix = st.doc.path.suffix
+        cands: list[str] = []
+        mapping: dict[str, int] = {}
+        if suffix == ".py":
+            from ocode.engines.oki.pyparse import parse_python as _pp
+
+            info = _pp(st.doc.text)
+            for cls in info.classes:
+                label = f"class {cls.name}:{cls.lineno}"
+                cands.append(label)
+                mapping[label] = cls.lineno
+                for fld in cls.fields:
+                    label2 = f"  {fld.name} ({fld.ftype}):{fld.lineno}"
+                    cands.append(label2)
+                    mapping[label2] = fld.lineno
+                for m in cls.methods:
+                    label3 = f"  {m.name}():{m.lineno}"
+                    cands.append(label3)
+                    mapping[label3] = m.lineno
+        elif suffix == ".xml":
+            from ocode.engines.oki.xmlparse import parse_xml as _px
+
+            xinfo = _px(st.doc.text)
+            for x in xinfo.xmlids:
+                label = f"{x.kind} {x.xmlid}"
+                cands.append(label)
+                mapping[label] = 1
+            for v in xinfo.views:
+                label = f"view {v.xmlid} ({v.model})"
+                if label not in mapping:
+                    cands.append(label)
+                    mapping[label] = 1
+        if not cands:
+            self.notify("No symbols", timeout=2)
+            return
+        self._outline_map = mapping
+        base = st.doc.path.parent
+        self.push_screen(FilterScreen("Outline/Symbols", cands, base), self._on_outline_pick)
+
+    def _on_outline_pick(self, picked: Path | None) -> None:
+        if picked is None:
+            return
+        lineno = self._outline_map.get(picked.name, 1)
+        try:
+            st = self.active_state()
+            st.goto_line(lineno)
+            self.query_one("#editor", OcodeEditor).refresh()
+            self.update_chrome()
+        except Exception:
+            pass
+
+    def action_goto_definition(self) -> None:
+        if self.oki is None:
+            self.notify("Index not ready yet", timeout=2)
+            return
+        try:
+            st = self.active_state()
+        except Exception:
+            return
+        frag = (st.fragment() or st.word_before_cursor()).strip(".,;:'\"()")
+        if not frag:
+            return
+        target = self._goto_target(frag)
+        if target is None:
+            self.notify(f"No definition for '{frag}'", timeout=2)
+            return
+        path, line = target
+        self.open_path(path, line)
+        self.query_one("#editor", OcodeEditor).focus()
+
+    def _goto_target(self, frag: str) -> tuple[Path, int] | None:
+        assert self.oki is not None and self.oki_db is not None
+        base = frag.split(".")[-1]
+        if frag in self.oki.models():
+            row = self.oki_db.query_one(
+                "SELECT file, lineno FROM models WHERE name=? ORDER BY kind LIMIT 1", (frag,)
+            )
+            if row:
+                return (Path(str(row["file"])), int(row["lineno"]))
+        if "." in frag and self.oki.xmlid_exists(frag):
+            mod, bare = frag.split(".", 1)
+            row = self.oki_db.query_one(
+                "SELECT file, lineno FROM xmlids WHERE xmlid=? AND module=?", (bare, mod)
+            )
+            if row:
+                return (Path(str(row["file"])), int(row["lineno"]) or 1)
+        try:
+            st = self.active_state()
+            model = self._model_at_cursor(st)
+        except Exception:
+            model = ""
+        if model and base:
+            row = self.oki_db.query_one(
+                "SELECT file, lineno FROM fields WHERE model=? AND name=? LIMIT 1", (model, base)
+            )
+            if row:
+                return (Path(str(row["file"])), int(row["lineno"]))
+        return None
+
+    def action_goto_references(self) -> None:
+        try:
+            st = self.active_state()
+        except Exception:
+            return
+        word = (st.word_before_cursor() or st.fragment()).strip(".,;:'\"()")
+        if not word:
+            return
+        proj = self.project
+        roots = list(proj.addons_paths) if proj and proj.addons_paths else [self.start_path]
+        from ocode.engines.smn.search import content_search as _cs
+
+        hits = _cs(word, roots, max_hits=200)
+        if not hits:
+            self.notify(f"No references to '{word}'", timeout=2)
+            return
+        self._ref_targets = {}
+        cands: list[str] = []
+        base = proj.root if proj and proj.root else self.start_path
+        for h in hits:
+            try:
+                rel: object = h.path.relative_to(base)
+            except ValueError:
+                rel = h.path
+            label = f"{rel}:{h.line}:{h.col} {h.snippet}"
+            cands.append(label)
+            self._ref_targets[label] = (str(h.path), h.line)
+        self.push_screen(FilterScreen(f"References: {word}", cands, base), self._on_ref_pick)
+
+    def _on_ref_pick(self, picked: Path | None) -> None:
+        if picked is None:
+            return
+        label = str(picked) if not picked.is_absolute() else picked.name
+        for key, (path_s, line) in self._ref_targets.items():
+            if key == label or key.endswith(label) or label in key:
+                self.open_path(Path(path_s), line)
+                try:
+                    self.query_one("#editor", OcodeEditor).focus()
+                except Exception:
+                    pass
+                return
+
+    def action_problem_next(self) -> None:
+        self._problem_step(1)
+
+    def action_problem_prev(self) -> None:
+        self._problem_step(-1)
+
+    def _problem_step(self, delta: int) -> None:
+        try:
+            panel = self.query_one("#problems", ProblemsPanel)
+        except Exception:
+            return
+        if not self.problems:
+            self.notify("No problems", timeout=2)
+            return
+        panel.move(delta)
+        cur = panel.current()
+        if cur is not None:
+            self.open_path(Path(cur.file), cur.line)
+        self.update_chrome()
+
+    async def on_problem_chosen(self, event: ProblemChosen) -> None:
+        self.open_path(Path(event.file), event.line)
+        self.query_one("#editor", OcodeEditor).focus()
 
 
 def _is_relative(p: Path, base: Path) -> bool:
