@@ -33,6 +33,17 @@ from ocode.engines.omls.snippets import SNIPPETS, expand_snippet, render_snippet
 from ocode.engines.opd.detector import OdooProject, detect_project
 from ocode.engines.osg.applier import PlannedChange, apply_changes, preview_diff
 from ocode.engines.osh.shell import ShellSession, is_production_db, shell_command
+from ocode.engines.oss.dbtools import (
+    DatabaseError,
+    DbConf,
+    backup_database,
+    database_size,
+    db_conf_from_odoo_conf,
+    drop_database,
+    duplicate_database,
+    list_databases,
+    pg_binaries_available,
+)
 from ocode.engines.oss.manager import ServerManager
 from ocode.engines.oss.profiles import ServerProfile, default_profile, load_profiles, save_profiles
 from ocode.engines.ote.document import Document
@@ -45,6 +56,7 @@ from ocode.engines.ses import CursorPos, SessionData, SessionManager
 from ocode.engines.smn.related import cycle_related, find_module_dir, key_file, related_files
 from ocode.engines.smn.search import ContentHit
 from ocode.ui.screens import FilterScreen, GrepScreen
+from ocode.ui.screens.db import DbScreen, NameScreen
 from ocode.ui.screens.generate import (
     GENERATORS,
     AccessScreen,
@@ -122,6 +134,7 @@ def build_default_commands() -> CommandRegistry:
     reg.register("ocode.git.commit", "Git: Commit...", keybinding="ctrl+shift+g")
     reg.register("ocode.git.blame", "Git: Toggle Blame Line", keybinding="ctrl+shift+b")
     reg.register("ocode.vim.toggle", "Vim: Toggle Modal Editing")
+    reg.register("ocode.db.manage", "Databases...", keybinding="f9")
     reg.register("ocode.app.quit", "Quit", keybinding="ctrl+q")
     return reg
 
@@ -164,6 +177,7 @@ class OcodeApp(App[None]):
         ("ctrl+enter", "shell_send", "Send"),
         ("ctrl+shift+g", "git_commit", "Commit"),
         ("ctrl+shift+b", "git_blame", "Blame"),
+        ("f9", "db_manage", "DB"),
         ("ctrl+shift+p", "show_palette", "Palette"),
         ("f3", "find_next", "Next"),
         ("shift+f3", "find_prev", "Prev"),
@@ -213,6 +227,8 @@ class OcodeApp(App[None]):
         self._git_hunks: list[Hunk] = []
         self._blame_on = False
         self._blame_cache: dict[tuple[str, int], str] = {}
+        self._db_conf_cache: DbConf | None = None
+        self._db_pending = ""
 
     # -- compose -------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -1561,6 +1577,138 @@ class OcodeApp(App[None]):
         elif ok is False:
             self.notify("Commit failed", severity="error")
         self._poll_git()
+
+    # -- M7: databases (FR-OSS-026, F9) --------------------------------------
+    def _db_conf(self) -> DbConf | None:
+        srv = self.server
+        conf_path = srv.profile.conf if srv else ""
+        if conf_path:
+            try:
+                return db_conf_from_odoo_conf(conf_path)
+            except DatabaseError as exc:
+                self.notify(f"DB: {exc}", severity="warning")
+                return None
+        return DbConf()
+
+    def action_db_manage(self) -> None:
+        conf = self._db_conf()
+        if conf is None:
+            return
+        ok, hint = pg_binaries_available(conf)
+        if not ok:
+            self.notify(f"DB: {hint}", severity="warning")
+            return
+        try:
+            names = list_databases(conf)
+        except DatabaseError as exc:
+            self.notify(f"DB list failed: {exc}", severity="error")
+            return
+        current = self.server.profile.db if self.server else ""
+        rows: list[tuple[str, str]] = []
+        for name in names[:100]:
+            try:
+                size = database_size(conf, name)
+            except DatabaseError:
+                size = "?"
+            rows.append((name, size))
+        self._db_conf_cache = conf
+        self.push_screen(DbScreen(rows, current), self._on_db_action)
+
+    def _on_db_action(self, choice: tuple[str, str] | None) -> None:
+        if choice is None:
+            return
+        action, name = choice
+        if action == "select":
+            self._db_use(name)
+        elif action == "backup":
+            self._db_backup_prompt(name)
+        elif action == "duplicate":
+            self._db_duplicate_prompt(name)
+        elif action == "drop":
+            self.push_screen(
+                ConfirmScreen(f"DROP database '{name}'? This cannot be undone."),
+                lambda ok: self._db_drop_confirmed(name, bool(ok)),
+            )
+
+    def _db_use(self, name: str) -> None:
+        srv = self.server
+        if srv is None:
+            return
+        srv.profile.db = name
+        ws = self.project.root if self.project and self.project.root else self.start_path
+        ws = ws if ws.is_dir() else ws.parent
+        try:
+            save_profiles(ws, self.server_profiles)
+        except OSError as exc:
+            self.notify(f"Cannot save profile: {exc}", severity="error")
+            return
+        self.notify(f"Database: {name}", timeout=2)
+        self.update_chrome()
+
+    def _db_backup_prompt(self, name: str) -> None:
+        import datetime as _dt
+
+        default = str(Path.home() / f"{name}-{_dt.date.today():%Y%m%d}.dump")
+        self._db_pending = name
+        self.push_screen(NameScreen(f"Backup '{name}' to:", default), self._on_db_backup_dest)
+
+    def _on_db_backup_dest(self, dest: str | None) -> None:
+        name = getattr(self, "_db_pending", "")
+        if not dest or not name:
+            return
+        conf = getattr(self, "_db_conf_cache", None) or DbConf()
+        self.notify(f"Backing up {name}…", timeout=2)
+        self.scheduler.run_in_thread("db-backup", self._db_backup_sync, conf, name, dest)
+
+    def _db_backup_sync(self, conf: DbConf, name: str, dest: str) -> None:
+        try:
+            backup_database(conf, name, Path(dest))
+        except DatabaseError as exc:
+            self.call_from_thread(self.notify, f"Backup failed: {exc}", {"severity": "error"})
+            return
+        self.call_from_thread(self.notify, f"Backup done: {dest}", {"timeout": 3})
+
+    def _db_duplicate_prompt(self, name: str) -> None:
+        self._db_pending = name
+        self.push_screen(NameScreen(f"Duplicate '{name}' as:", f"{name}_copy"),
+                         self._on_db_duplicate_dest)
+
+    def _on_db_duplicate_dest(self, dest: str | None) -> None:
+        name = getattr(self, "_db_pending", "")
+        if not dest or not name:
+            return
+        self.push_screen(
+            ConfirmScreen(f"Duplicate '{name}' → '{dest}'? (kills its connections)"),
+            lambda ok: self._db_duplicate_confirmed(name, dest, bool(ok)),
+        )
+
+    def _db_duplicate_confirmed(self, src: str, dst: str, ok: bool) -> None:
+        if not ok:
+            return
+        conf = getattr(self, "_db_conf_cache", None) or DbConf()
+        self.scheduler.run_in_thread("db-dup", self._db_duplicate_sync, conf, src, dst)
+
+    def _db_duplicate_sync(self, conf: DbConf, src: str, dst: str) -> None:
+        try:
+            duplicate_database(conf, src, dst)
+        except DatabaseError as exc:
+            self.call_from_thread(self.notify, f"Duplicate failed: {exc}", {"severity": "error"})
+            return
+        self.call_from_thread(self.notify, f"Duplicated → {dst}", {"timeout": 3})
+
+    def _db_drop_confirmed(self, name: str, ok: bool) -> None:
+        if not ok:
+            return
+        conf = getattr(self, "_db_conf_cache", None) or DbConf()
+        self.scheduler.run_in_thread("db-drop", self._db_drop_sync, conf, name)
+
+    def _db_drop_sync(self, conf: DbConf, name: str) -> None:
+        try:
+            drop_database(conf, name)
+        except DatabaseError as exc:
+            self.call_from_thread(self.notify, f"Drop failed: {exc}", {"severity": "error"})
+            return
+        self.call_from_thread(self.notify, f"Dropped {name}", {"timeout": 3})
 
     def action_shell_send(self) -> None:
         shell = self.shell

@@ -58,6 +58,7 @@ HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("F5", "Restart server"),
         ("Ctrl+F5", "Restart + update current module"),
         ("Ctrl+Shift+F5", "Update modules..."),
+        ("F9", "Databases (list/select/backup/duplicate/drop)"),
         ("Ctrl+` / F7", "Odoo shell (Ctrl+` may not reach app in some terminals)"),
         ("Ctrl+Enter", "Send line/selection to shell"),
         ("Ctrl+J", "Cycle bottom panel (Logs/Shell/Problems)"),

@@ -1,5 +1,16 @@
 """OSS engine: Odoo server control + logs (PRD §4.5, M3)."""
 
+from ocode.engines.oss.dbtools import (
+    DatabaseError,
+    DbConf,
+    backup_database,
+    database_size,
+    db_conf_from_odoo_conf,
+    drop_database,
+    duplicate_database,
+    list_databases,
+    pg_binaries_available,
+)
 from ocode.engines.oss.failure import FailureHint, detect_failure
 from ocode.engines.oss.flags import (
     FLAG_CATALOG,
@@ -23,6 +34,8 @@ from ocode.engines.oss.profiles import ServerProfile, default_profile, load_prof
 from ocode.engines.oss.tailer import LogTailer
 
 __all__ = [
+    "DatabaseError",
+    "DbConf",
     "FLAG_CATALOG",
     "FailureHint",
     "FlagSpec",
@@ -36,13 +49,20 @@ __all__ = [
     "ServerProfile",
     "ServerStatus",
     "TraceBlock",
+    "backup_database",
     "build_args",
+    "database_size",
+    "db_conf_from_odoo_conf",
     "default_profile",
     "detect_failure",
+    "drop_database",
+    "duplicate_database",
     "extract_file_links",
     "group_tracebacks",
+    "list_databases",
     "load_profiles",
     "parse_odoo_line",
+    "pg_binaries_available",
     "preview_command",
     "save_profiles",
     "validate_flags",
