@@ -1,0 +1,30 @@
+name: deb
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+jobs:
+  build-deb:
+    strategy:
+      matrix:
+        distro: ["22.04", "24.04"]
+    runs-on: ubuntu-latest
+    container: ubuntu:${{ matrix.distro }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: apt-get update && apt-get install -y debhelper dh-virtualenv python3 dpkg-dev lintian
+      - name: Build binary package
+        run: dpkg-buildpackage -b -uc -us
+      - name: Lint package
+        run: lintian ../ocode_*.deb || true
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-ubuntu${{ matrix.distro }}
+          path: /github/*.deb
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: /github/*.deb
