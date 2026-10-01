@@ -1,3 +1,9 @@
+ocode (1.0.2-2) unstable; urgency=medium
+
+  * Add /usr/bin/ocode symlink (dh-virtualenv installed to /opt/venvs).
+
+ -- ocode contributors <dev@ocode.local>  Thu, 01 Oct 2026 00:00:00 +0000
+
 ocode (1.0.2-1) unstable; urgency=medium
 
   * Re-release: 1.0.0/1.0.1 filenames were consumed on PyPI.
