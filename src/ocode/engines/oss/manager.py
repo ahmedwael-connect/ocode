@@ -7,6 +7,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ocode.engines.oss.docker import (
+    ComposeProject,
+    LogStream,
+    detect_compose,
+    exec_update,
+    service_action,
+)
 from ocode.engines.oss.failure import FailureHint, detect_failure
 from ocode.engines.oss.flags import build_args, preview_command
 from ocode.engines.oss.logs import LogBuffer, LogRecord
@@ -35,6 +42,9 @@ class ServerManager:
         self.tailer: LogTailer | None = None
         self.status: ServerStatus = "Stopped"
         self.started_at: float | None = None
+        self.workspace: Path | None = None
+        self._compose: ComposeProject | None = None
+        self._log_stream: LogStream | None = None
         self._recent_output: list[str] = []
         self._status_listeners: list[Callable[[ServerStatus], None]] = []
         self._log_listeners: list[Callable[[LogRecord], None]] = []
@@ -99,9 +109,112 @@ class ServerManager:
     def docker_command(self, action: str = "restart") -> list[str]:
         return ["docker", "compose", action, self.profile.docker_service or "odoo"]
 
+    def compose_project(self) -> ComposeProject | None:
+        if self._compose is not None:
+            return self._compose
+        if self.profile.docker_compose:
+            svc = self.profile.docker_service or "odoo"
+            self._compose = ComposeProject(Path(self.profile.docker_compose), svc)
+            return self._compose
+        base = self.workspace or Path.cwd()
+        self._compose = detect_compose(base, self.profile.docker_service or "odoo")
+        return self._compose
+
+    async def _run_systemctl(self, action: str) -> ServerStatus:
+        import asyncio as _aio
+
+        cmd = ["systemctl", action, self.profile.systemd_unit or "odoo"]
+        if action == "start":
+            self._set_status("Starting")
+        elif action == "stop":
+            self._set_status("Stopped")
+        else:
+            self._set_status("Running")
+        try:
+            proc = await _aio.create_subprocess_exec(
+                *cmd, stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.STDOUT,
+            )
+            out, _ = await _aio.wait_for(proc.communicate(), 60)
+        except (OSError, NotImplementedError) as exc:
+            self._feed(f"ERROR ocode: systemctl failed: {exc}")
+            self._set_status("Crashed")
+            return self.status
+        except TimeoutError:
+            self._feed("ERROR ocode: systemctl timed out (sudo prompt? run it manually)")
+            self._set_status("Crashed")
+            return self.status
+        for ln in out.decode("utf-8", errors="ignore").splitlines():
+            if ln.strip():
+                self._feed(f"INFO ocode[systemctl]: {ln.strip()}")
+        if proc.returncode not in (0, None):
+            self._feed(f"ERROR ocode: systemctl {action} exited {proc.returncode}")
+            self._set_status("Crashed")
+            return self.status
+        self._set_status("Running" if action in ("start", "restart") else "Stopped")
+        return self.status
+
+    async def _docker_start_stream(self) -> None:
+        proj = self.compose_project()
+        if proj is None:
+            return
+        await self._docker_stop_stream()
+        stream = LogStream(proj)
+        self._log_stream = stream
+        await stream.start(self._feed)
+
+    async def _docker_stop_stream(self) -> None:
+        if self._log_stream is not None:
+            await self._log_stream.stop()
+            self._log_stream = None
+
+    def docker_preview(self, action: str) -> str:
+        proj = self.compose_project()
+        base = ["docker", "compose"] + (["-f", str(proj.file)] if proj else [])
+        if action == "up":
+            args: list[str] = ["up", "-d", self.profile.docker_service or "odoo"]
+        else:
+            args = [action, self.profile.docker_service or "odoo"]
+        return preview_command(base[0], base[1:] + args)
+
+    async def start_debug(self, debug_port: int = 5678) -> ServerStatus:
+        """Start under debugpy (DAP). Requires python + odoo_bin in profile."""
+        if not self.profile.python or not self.profile.odoo_bin:
+            self._feed("ERROR ocode: debug needs python + odoo-bin in profile")
+            self._set_status("Crashed")
+            return self.status
+        prog, argv = self.command_for()
+        dbg = [self.profile.python, "-m", "debugpy", "--listen",
+               f"127.0.0.1:{debug_port}", *argv]
+        _ = prog
+        self._set_status("Starting")
+        try:
+            await self.proc.start(dbg[0], dbg[1:], env=dict(self.profile.env) or None)
+        except OSError as exc:
+            self._feed(f"ERROR ocode: debug start failed: {exc}")
+            self._set_status("Crashed")
+            return self.status
+        self.started_at = time.time()
+        self._set_status("Running")
+        return self.status
+
     async def start(self) -> ServerStatus:
-        if self.profile.mode in ("systemd", "docker"):
-            # app layer runs these via sudo prompt; manager records intent
+        if self.profile.mode == "systemd":
+            return await self._run_systemctl("start")
+        if self.profile.mode == "docker":
+            proj = self.compose_project()
+            if proj is None:
+                self._feed("ERROR ocode: no compose file (set docker_compose in profile)")
+                self._set_status("Crashed")
+                return self.status
+            self._set_status("Starting")
+            code, out, err = await service_action(proj, "up")
+            for ln in (out + "\n" + err).splitlines():
+                if ln.strip():
+                    self._feed(f"INFO ocode[compose]: {ln.strip()}")
+            if code != 0:
+                self._set_status("Crashed")
+                return self.status
+            await self._docker_start_stream()
             self._set_status("Running")
             return self.status
         prog, argv = self.command_for()
@@ -117,7 +230,19 @@ class ServerManager:
         return self.status
 
     async def stop(self) -> ServerStatus:
-        if self.profile.mode in ("systemd", "docker") or not self.proc.running:
+        if self.profile.mode == "systemd":
+            return await self._run_systemctl("stop")
+        if self.profile.mode == "docker":
+            await self._docker_stop_stream()
+            proj = self.compose_project()
+            if proj is not None:
+                code, out, err = await service_action(proj, "stop")
+                for ln in (out + "\n" + err).splitlines():
+                    if ln.strip():
+                        self._feed(f"INFO ocode[compose]: {ln.strip()}")
+            self._set_status("Stopped")
+            return self.status
+        if not self.proc.running:
             self._set_status("Stopped")
             return self.status
         await self.proc.stop(timeout=self.profile.stop_timeout)
@@ -134,11 +259,12 @@ class ServerManager:
         """One-shot -u then normal start (FR-OSS-007)."""
         if not modules:
             return await self.restart()
-        if self.profile.mode in ("systemd", "docker") or not self.profile.odoo_bin:
-            # without managed process, just record update intent
+        if self.profile.mode == "docker":
+            return await self._docker_update(modules)
+        if self.profile.mode == "systemd" and not self.profile.odoo_bin:
             self._set_status("Updating")
             mods = ",".join(modules)
-            self._feed(f"INFO ocode: update {mods} (mode={self.profile.mode})")
+            self._feed(f"INFO ocode: update {mods} (mode=systemd, no odoo-bin for one-shot)")
             self._set_status("Stopped")
             return self.status
         self._set_status("Updating")
@@ -163,7 +289,38 @@ class ServerManager:
             self.snapshot_hint = hint
             self._set_status("Crashed")
             return self.status
+        if self.profile.mode == "systemd":
+            return await self._run_systemctl("restart")
         return await self.start()
+
+    async def _docker_update(self, modules: list[str]) -> ServerStatus:
+        proj = self.compose_project()
+        if proj is None:
+            self._feed("ERROR ocode: no compose file (set docker_compose in profile)")
+            self._set_status("Crashed")
+            return self.status
+        self._set_status("Updating")
+        container_bin = self.profile.docker_odoo_bin or "odoo"
+        argv = [container_bin]
+        if self.profile.db:
+            argv += ["-d", self.profile.db]
+        argv += ["-u", ",".join(modules), "--stop-after-init"]
+        code, out, err = await exec_update(proj, argv)
+        for ln in (out + "\n" + err).splitlines():
+            if ln.strip():
+                self._feed(ln.rstrip("\n"))
+        if code != 0:
+            hint = detect_failure(out + "\n" + err)
+            self.snapshot_hint = hint
+            self._set_status("Crashed")
+            return self.status
+        code, _out, _err = await service_action(proj, "restart")
+        if code != 0:
+            self._set_status("Crashed")
+            return self.status
+        await self._docker_start_stream()
+        self._set_status("Running")
+        return self.status
 
     snapshot_hint: FailureHint | None = None
 

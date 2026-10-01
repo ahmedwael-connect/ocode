@@ -81,6 +81,20 @@ db       = "mydb"
 mode     = "managed"          # managed | systemd | docker
 flags    = ["--dev=reload,qweb,xml", "--log-level=info"]
 lint_before_restart = "warn"  # off | warn | block
+# docker mode:
+# docker_compose = "/opt/odoo17/compose.yaml"
+# docker_service = "odoo"     # auto-detected if omitted
+# docker_odoo_bin = "odoo"    # binary path *inside* the container
+```
+
+```toml
+# ~/.config/ocode/config.toml extras
+[editor.lsp]
+enabled = false              # opt-in LSP completions (e.g. pyright)
+command = ["pyright-langserver", "--stdio"]
+
+[ai]
+provider = "offline"         # offline (default) or ocode.ai_providers entry
 ```
 
 ## Plugins (M7)
@@ -118,7 +132,9 @@ A failing plugin is isolated and reported — it never breaks the host.
 - **M6** — perf pass, `F1` help, `doctor keys`, man page, completions,
   Debian skeleton, v1.0.0-rc1.
 - **M7 (in progress)** — git integration, Vim modal editing, DB helpers,
-  plugin API (`ocode.plugins` entry points).
+  plugin API (`ocode.plugins` entry points), Docker compose control,
+  opt-in LSP completions, DAP debugging (breakpoints + debugpy launch),
+  offline-first AI assist.
 
 ## Troubleshooting
 

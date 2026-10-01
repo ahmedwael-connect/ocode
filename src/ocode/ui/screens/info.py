@@ -52,8 +52,10 @@ HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Ctrl+K I", "Hover info"),
         ("Ctrl+Shift+O", "Outline/symbols"),
         ("F4 / Shift+F4", "Next / previous problem"),
+        ("Ctrl+Shift+E", "AI: explain symbol (offline)"),
+        ("Ctrl+Shift+D", "AI: draft docstring"),
     )),
-    ("Server & shell", (
+    ("Server, shell & debug", (
         ("F6", "Start / stop server"),
         ("F5", "Restart server"),
         ("Ctrl+F5", "Restart + update current module"),
@@ -61,6 +63,8 @@ HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("F9", "Databases (list/select/backup/duplicate/drop)"),
         ("Ctrl+` / F7", "Odoo shell (Ctrl+` may not reach app in some terminals)"),
         ("Ctrl+Enter", "Send line/selection to shell"),
+        ("Ctrl+F9", "Toggle breakpoint"),
+        ("Shift+F9", "Debug launch (debugpy + DAP)"),
         ("Ctrl+J", "Cycle bottom panel (Logs/Shell/Problems)"),
     )),
     ("Generate", (

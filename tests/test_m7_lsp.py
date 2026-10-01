@@ -154,3 +154,5 @@ async def test_lsp_merges_into_popup(tmp_path: Path, monkeypatch: object) -> Non
         await pilot.pause()
         pop = app.query_one("#complete", CompletionPopup)
         assert any(c.label == "lsp_magic" for c in pop.items)
+        if app.lsp is not None:
+            await app.lsp.shutdown()

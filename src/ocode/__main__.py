@@ -100,6 +100,19 @@ def cmd_doctor(check: str = "") -> int:
             print("plugins: none")
     except OSError:
         print("plugins: probe failed")
+    try:
+        from ocode.engines.oss.docker import detect_compose, docker_available
+
+        ok, _hint = docker_available()
+        found = detect_compose(Path.cwd())
+        if found is not None:
+            print(f"compose: {found.file} service={found.service}")
+        elif ok:
+            print("compose: no compose file here")
+        else:
+            print("compose: docker not found")
+    except OSError:
+        print("compose: probe failed")
     if check == "keys":
         print("keys: combos that may not reach the app without Kitty protocol:")
         for combo, alt in (("Ctrl+Shift+P/M/F/N", "remap or use F-keys"),

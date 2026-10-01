@@ -50,6 +50,7 @@ class OcodeEditor(Widget, can_focus=True):
         self.hunks: list[Hunk] = []  # git diff gutter (M7)
         self.vim_enabled = False
         self._vim_ctl: VimController | None = None
+        self.breakpoints: set[int] = set()  # 1-based lines (M7 DAP)
 
     @property
     def cursor(self) -> tuple[int, int]:
@@ -67,6 +68,8 @@ class OcodeEditor(Widget, can_focus=True):
         _ = (line, col, length)
 
     def _gutter_mark(self, lineno_1b: int) -> tuple[str, str]:
+        if lineno_1b in self.breakpoints:
+            return ("●", "bold blue")
         for h in self.hunks:
             if h.kind == "del":
                 if lineno_1b == h.new_start:

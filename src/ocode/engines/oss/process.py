@@ -77,15 +77,29 @@ class ManagedProc:
                 except OSError:
                     break
 
+    async def _reap_readers(self) -> None:
+        if not self._readers:
+            return
+        # let pumps drain to EOF first (clean transport shutdown), then cancel stragglers
+        _, pending = await asyncio.wait(self._readers, timeout=2.0)
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*self._readers, return_exceptions=True)
+        self._readers = []
+        # close the transport deterministically (avoids GC-on-closed-loop warnings)
+        transport = getattr(self.proc, "_transport", None)
+        if transport is not None:
+            try:
+                transport.close()
+            except (OSError, RuntimeError):
+                pass
+
     async def wait(self) -> int:
         if self.proc is None:
             return -1
         rc = await self.proc.wait()
         self.returncode = rc
-        for t in self._readers:
-            if not t.done():
-                t.cancel()
-        self._readers = []
+        await self._reap_readers()
         return rc
 
     async def stop(self, timeout: float = 10.0) -> int:
@@ -104,6 +118,7 @@ class ManagedProc:
             try:
                 await asyncio.wait_for(proc.wait(), timeout / 2)
                 self.returncode = proc.returncode
+                await self._reap_readers()
                 return proc.returncode if proc.returncode is not None else -1
             except TimeoutError:
                 continue
@@ -116,4 +131,5 @@ class ManagedProc:
         except TimeoutError:
             pass
         self.returncode = proc.returncode
+        await self._reap_readers()
         return proc.returncode if proc.returncode is not None else -1

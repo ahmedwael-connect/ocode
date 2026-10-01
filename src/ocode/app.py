@@ -16,6 +16,7 @@ from ocode.core.config import OcodeConfig
 from ocode.core.events import EventBus
 from ocode.core.plugins import PluginAPI, PluginRegistry
 from ocode.core.tasks import TaskScheduler
+from ocode.engines.dap import DapClient
 from ocode.engines.git.repo import (
     GitRepo,
     Hunk,
@@ -24,10 +25,11 @@ from ocode.engines.git.repo import (
     find_repo,
     repo_status,
 )
+from ocode.engines.lsp import LspClient
 from ocode.engines.oki.db import OkiDb, index_path_for
 from ocode.engines.oki.indexer import Indexer
 from ocode.engines.oki.query import OkiQuery
-from ocode.engines.omls.complete import complete_at
+from ocode.engines.omls.complete import Completion, complete_at
 from ocode.engines.omls.diagnostics import Diagnostic, FileCtx, analyze_file
 from ocode.engines.omls.quickfix import apply_fix, available_fixes
 from ocode.engines.omls.snippets import SNIPPETS, expand_snippet, render_snippet
@@ -136,6 +138,10 @@ def build_default_commands() -> CommandRegistry:
     reg.register("ocode.git.blame", "Git: Toggle Blame Line", keybinding="ctrl+shift+b")
     reg.register("ocode.vim.toggle", "Vim: Toggle Modal Editing")
     reg.register("ocode.db.manage", "Databases...", keybinding="f9")
+    reg.register("ocode.debug.breakpoint", "Debug: Toggle Breakpoint", keybinding="ctrl+f9")
+    reg.register("ocode.debug.launch", "Debug: Launch with debugpy", keybinding="shift+f9")
+    reg.register("ocode.ai.explain", "AI: Explain Symbol", keybinding="ctrl+shift+e")
+    reg.register("ocode.ai.docstring", "AI: Draft Docstring", keybinding="ctrl+shift+d")
     reg.register("ocode.app.quit", "Quit", keybinding="ctrl+q")
     return reg
 
@@ -179,6 +185,10 @@ class OcodeApp(App[None]):
         ("ctrl+shift+g", "git_commit", "Commit"),
         ("ctrl+shift+b", "git_blame", "Blame"),
         ("f9", "db_manage", "DB"),
+        ("ctrl+f9", "debug_breakpoint", "Brk"),
+        ("shift+f9", "debug_launch", "Debug"),
+        ("ctrl+shift+e", "ai_explain", "Explain"),
+        ("ctrl+shift+d", "ai_docstring", "Docstr"),
         ("ctrl+shift+p", "show_palette", "Palette"),
         ("f3", "find_next", "Next"),
         ("shift+f3", "find_prev", "Prev"),
@@ -230,6 +240,11 @@ class OcodeApp(App[None]):
         self._blame_cache: dict[tuple[str, int], str] = {}
         self._db_conf_cache: DbConf | None = None
         self._db_pending = ""
+        self.breakpoints: dict[str, list[int]] = {}
+        self.dap: DapClient | None = None
+        self.lsp: LspClient | None = None
+        self._lsp_opened: set[str] = set()
+        self._lsp_starting = False
         self.plugins = PluginRegistry(
             PluginAPI(self.commands, self.bus, lambda msg: self.notify(msg, timeout=3))
         )
@@ -278,6 +293,7 @@ class OcodeApp(App[None]):
         self._apply_bottom_mode()
         self._init_oki(ws)
         self._load_plugins()
+        self._load_breakpoints()
         self.update_chrome()
         self.set_interval(5.0, self._autoswap)
         self.set_interval(1.0, self._poll_tailer)
@@ -306,6 +322,18 @@ class OcodeApp(App[None]):
 
     def on_unmount(self) -> None:
         self._save_session()
+        if self.dap is not None:
+            self.dap = None  # event loop is going away; server stop below reaps proc
+        if self.lsp is not None:
+            try:
+                import asyncio as _aio
+
+                loop = _aio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.lsp.shutdown())
+            except (OSError, RuntimeError):
+                pass
+            self.lsp = None
         if self.shell is not None:
             try:
                 self.shell.stop()
@@ -443,6 +471,7 @@ class OcodeApp(App[None]):
                 prof.flags = [f for f in prof.flags if "gevent" not in f]
         self.server_profiles.setdefault("dev", prof)
         self.server = ServerManager(prof)
+        self.server.workspace = ws
         try:
             panel = self.query_one("#logs", LogPanel)
             panel.buffer = self.server.logs
@@ -601,6 +630,8 @@ class OcodeApp(App[None]):
             return
         editor.state = self.active_state()
         editor.hunks = list(self._git_hunks)
+        path = editor.state.doc.path
+        editor.breakpoints = set(self.breakpoints.get(str(path), [])) if path else set()
         editor.refresh()
         self.update_chrome()
 
@@ -1540,6 +1571,160 @@ class OcodeApp(App[None]):
         info = self._blame_cache[key]
         return f" | {info}" if info else ""
 
+    # -- M7: breakpoints + debugpy/DAP -------------------------------------
+    def _breakpoints_path(self) -> Path | None:
+        base = None
+        if self.project and self.project.root:
+            base = self.project.root
+        elif self.start_path.is_dir():
+            base = self.start_path
+        else:
+            base = self.start_path.parent
+        try:
+            return base / ".ocode" / "breakpoints.json"
+        except OSError:
+            return None
+
+    def _load_breakpoints(self) -> None:
+        import json as _json
+
+        path = self._breakpoints_path()
+        if path is None:
+            return
+        try:
+            raw = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(raw, dict):
+            self.breakpoints = {str(k): [int(x) for x in v if isinstance(x, int)]
+                                for k, v in raw.items() if isinstance(v, list)}
+
+    def _save_breakpoints(self) -> None:
+        import json as _json
+
+        path = self._breakpoints_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_json.dumps(self.breakpoints, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+
+    def action_debug_breakpoint(self) -> None:
+        try:
+            st = self.active_state()
+            editor = self.query_one("#editor", OcodeEditor)
+        except Exception:
+            return
+        if st.doc.path is None:
+            return
+        key = str(st.doc.path)
+        line = st.cursor.line + 1
+        marks = set(self.breakpoints.get(key, []))
+        if line in marks:
+            marks.discard(line)
+        else:
+            marks.add(line)
+        self.breakpoints[key] = sorted(marks)
+        editor.breakpoints = set(marks)
+        editor.refresh()
+        self._save_breakpoints()
+        self.update_chrome()
+
+    def action_debug_launch(self) -> None:
+        if self.dap is not None and self.dap.connected:
+            self._spawn(self._debug_stop())
+            return
+        if not any(self.breakpoints.values()):
+            self.notify("No breakpoints (Ctrl+F9 to toggle)", severity="warning")
+            return
+        srv = self.server
+        if srv is None:
+            return
+        self._spawn(self._debug_run())
+
+    async def _debug_run(self) -> None:
+        from ocode.engines.dap import DapError
+
+        srv = self.server
+        if srv is None:
+            return
+        self.notify("Debug: starting under debugpy…", timeout=3)
+        await srv.start_debug()
+        if srv.status != "Running":
+            self._report_server_hint()
+            self.update_chrome()
+            return
+        client = DapClient()
+        self.dap = client
+        try:
+            for _ in range(50):
+                try:
+                    await client.connect("127.0.0.1", 5678, timeout=1.0)
+                    break
+                except DapError:
+                    import asyncio as _aio
+
+                    await _aio.sleep(0.2)
+            else:
+                self.notify("Debug: adapter not listening on 5678", severity="error")
+                self.dap = None
+                return
+            await client.initialize()
+            for path, lines in self.breakpoints.items():
+                if lines:
+                    try:
+                        await client.set_breakpoints(path, sorted(lines))
+                    except DapError:
+                        pass
+            client.on_event("stopped", lambda body: self._spawn(self._on_debug_stopped(body)))
+            await client.configuration_done()
+            self.notify("Debug: attached (stopped events will jump)", timeout=3)
+        except DapError as exc:
+            self.notify(f"Debug: {exc}", severity="error")
+            self.dap = None
+        self.update_chrome()
+
+    async def _on_debug_stopped(self, body: dict[str, object]) -> None:
+        thread = body.get("threadId", 1)
+        client = self.dap
+        if client is None or not isinstance(thread, int):
+            return
+        from ocode.engines.dap import DapError
+
+        try:
+            await client.request("threads", {})
+            # location comes from the top stack frame
+            frames = await client.request("stackTrace", {"threadId": thread,
+                                                         "startFrame": 0, "levels": 1})
+        except DapError:
+            return
+        try:
+            first = frames["stackFrames"][0]
+            source = first.get("source", {})
+            path = source.get("path", "")
+            line = int(first.get("line", 1))
+        except (KeyError, IndexError, TypeError, ValueError):
+            path, line = "", 1
+        if path:
+            self.open_path(Path(str(path)), line)
+            self.notify(f"Stopped: {path}:{line}", timeout=5)
+        self.update_chrome()
+
+    async def _debug_stop(self) -> None:
+        if self.dap is not None:
+            try:
+                await self.dap.disconnect()
+            except OSError:
+                pass
+            self.dap = None
+        srv = self.server
+        if srv is not None:
+            await srv.stop()
+        self.notify("Debug session ended", timeout=2)
+        self.update_chrome()
+
     def action_toggle_vim(self) -> None:
         try:
             editor = self.query_one("#editor", OcodeEditor)
@@ -1788,6 +1973,78 @@ class OcodeApp(App[None]):
         st = editor.state
         return (st, st.pos_to_offset(st.cursor))
 
+    def _lsp_cfg(self) -> tuple[bool, list[str]]:
+        cfg = self.ocode_config.get("editor.lsp", {}) if self.ocode_config else {}
+        if not isinstance(cfg, dict):
+            return (False, [])
+        enabled = bool(cfg.get("enabled", False))
+        command = [str(c) for c in cfg.get("command", []) if isinstance(c, str)]
+        return (enabled, command)
+
+    def _ensure_lsp(self) -> LspClient | None:
+        enabled, command = self._lsp_cfg()
+        if not enabled or not command:
+            return None
+        if self.lsp is not None and self.lsp.running:
+            return self.lsp
+        if self._lsp_starting:
+            return None
+        self._lsp_starting = True
+        client = LspClient()
+        self.lsp = client
+        self._spawn(self._lsp_boot(client, command))
+        return None
+
+    async def _lsp_boot(self, client: LspClient, command: list[str]) -> None:
+        from ocode.engines.lsp import LspError
+
+        try:
+            await client.start(command)
+            base = self.project.root if self.project and self.project.root else self.start_path
+            await client.initialize(base if base.is_dir() else base.parent)
+        except LspError as exc:
+            self.notify(f"LSP: {exc}", severity="warning")
+        finally:
+            self._lsp_starting = False
+
+    async def _lsp_refresh_popup(self) -> None:
+        client = self.lsp
+        if client is None or not client.running or self.oki is None:
+            return
+        found = self._completion_ctx()
+        if found is None:
+            return
+        st, offset = found
+        if st.doc.path is None or st.doc.path.suffix != ".py":
+            return
+        from ocode.engines.lsp import LspError
+
+        try:
+            key = str(st.doc.path)
+            if key not in self._lsp_opened:
+                await client.did_open(st.doc.path, "python", st.doc.text)
+                self._lsp_opened.add(key)
+            else:
+                await client.did_change(st.doc.path, st.doc.text)
+            pos = st.cursor
+            lsp_items = await client.completion(st.doc.path, pos.line, pos.col)
+        except (LspError, OSError, TimeoutError):
+            return
+        items = complete_at(st.doc.path, st.doc.text, offset, self.oki,
+                            self.current_module_name(),
+                            self.project.version if self.project else None)
+        seen = {c.label for c in items}
+        for li in lsp_items:
+            if li.label not in seen:
+                seen.add(li.label)
+                items.append(Completion(li.label, "lsp", li.detail, li.insert, priority=2))
+        try:
+            pop = self.query_one("#complete", CompletionPopup)
+            if pop.is_open or items:
+                pop.show(items)
+        except Exception:
+            pass
+
     def action_show_completion(self) -> None:
         if self.oki is None:
             self.notify("Index not ready yet", timeout=2)
@@ -1806,6 +2063,8 @@ class OcodeApp(App[None]):
             self.query_one("#complete", CompletionPopup).show(items)
         except Exception:
             pass
+        if self._ensure_lsp() is not None:
+            self._spawn(self._lsp_refresh_popup())
 
     def after_edit_for_completion(self, _ch: str) -> None:
         if self.oki is None:
@@ -1831,6 +2090,8 @@ class OcodeApp(App[None]):
                 self.query_one("#complete", CompletionPopup).show(items)
             except Exception:
                 pass
+        if self._ensure_lsp() is not None:
+            self._spawn(self._lsp_refresh_popup())
 
     def accept_completion(self) -> None:
         try:
@@ -2402,6 +2663,61 @@ class OcodeApp(App[None]):
                 except Exception:
                     pass
                 return
+
+    # -- M7: AI assist, offline-first (no network by default) ---------------
+    def _ai_provider_name(self) -> str:
+        cfg = self.ocode_config.get("ai", {}) if self.ocode_config else {}
+        if isinstance(cfg, dict):
+            name = cfg.get("provider", "offline")
+            return str(name) if isinstance(name, str) else "offline"
+        return "offline"
+
+    def action_ai_explain(self) -> None:
+        if self.oki is None:
+            self.notify("Index not ready yet", timeout=2)
+            return
+        try:
+            st = self.active_state()
+        except Exception:
+            return
+        frag = (st.fragment() or st.word_before_cursor()).strip(".,;:'\"()")
+        if not frag:
+            self.notify("Nothing under cursor", timeout=2)
+            return
+        from ocode.engines.ai import get_provider
+
+        try:
+            provider = get_provider(self._ai_provider_name())
+        except KeyError as exc:
+            self.notify(str(exc), severity="warning")
+            return
+        body = provider.generate("explain", {"query": self.oki, "symbol": frag})
+        self.push_screen(HoverScreen(f"AI ({provider.name}): {frag}", body or "No info."),
+                         lambda _x: None)
+
+    def action_ai_docstring(self) -> None:
+        try:
+            editor = self.query_one("#editor", OcodeEditor)
+            st = editor.state
+        except Exception:
+            return
+        if st.doc.path is None or st.doc.path.suffix != ".py":
+            self.notify("Docstrings need a Python file", severity="warning")
+            return
+        from ocode.engines.ai import draft_docstring
+
+        insert_at, doc = draft_docstring(st.doc.text, st.cursor.line + 1)
+        if not doc:
+            self.notify("Already documented", timeout=2)
+            return
+        lines = st.lines()
+        insert_at = max(1, min(insert_at, len(lines) + 1))
+        off = st.doc.buffer.offset_of(insert_at - 1, 0)
+        st.doc.insert(off, doc)
+        st.set_cursor(st.offset_to_pos(off))
+        editor.refresh()
+        self.refresh_diagnostics_for_active()
+        self.update_chrome()
 
     def action_problem_next(self) -> None:
         self._problem_step(1)

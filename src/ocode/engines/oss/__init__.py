@@ -11,6 +11,14 @@ from ocode.engines.oss.dbtools import (
     list_databases,
     pg_binaries_available,
 )
+from ocode.engines.oss.docker import (
+    ComposeProject,
+    LogStream,
+    detect_compose,
+    docker_available,
+    exec_update,
+    service_action,
+)
 from ocode.engines.oss.failure import FailureHint, detect_failure
 from ocode.engines.oss.flags import (
     FLAG_CATALOG,
@@ -34,6 +42,7 @@ from ocode.engines.oss.profiles import ServerProfile, default_profile, load_prof
 from ocode.engines.oss.tailer import LogTailer
 
 __all__ = [
+    "ComposeProject",
     "DatabaseError",
     "DbConf",
     "FLAG_CATALOG",
@@ -42,6 +51,7 @@ __all__ = [
     "LogBuffer",
     "LogFilter",
     "LogRecord",
+    "LogStream",
     "LogTailer",
     "ManagedProc",
     "ProcResult",
@@ -54,9 +64,12 @@ __all__ = [
     "database_size",
     "db_conf_from_odoo_conf",
     "default_profile",
+    "detect_compose",
     "detect_failure",
+    "docker_available",
     "drop_database",
     "duplicate_database",
+    "exec_update",
     "extract_file_links",
     "group_tracebacks",
     "list_databases",
@@ -65,5 +78,6 @@ __all__ = [
     "pg_binaries_available",
     "preview_command",
     "save_profiles",
+    "service_action",
     "validate_flags",
 ]

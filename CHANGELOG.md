@@ -7,6 +7,13 @@
 - Databases: list/select/backup/duplicate/drop (`F9`, confirmed).
 - Plugins: `ocode.plugins` entry points (commands + event bus, isolated
   failures, `doctor` listing).
+- Docker: compose detection, up/stop/restart, exec updates, log streaming
+  (real `systemctl` execution too).
+- LSP: minimal stdio client + opt-in merged completions (`editor.lsp`).
+- DAP: client over stdio/TCP, breakpoint gutter + persistence,
+  debugpy launch with stop-to-jump.
+- AI: offline-first provider (explain/docstring), `ocode.ai_providers`
+  extension point, `Ctrl+Shift+E/D`. No network by default.
 
 ## 1.0.0-rc1 — M6: polish & release candidate
 

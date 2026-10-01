@@ -21,10 +21,12 @@ DEFAULTS: dict[str, Any] = {
         "trim_trailing_ws": True,
         "ensure_final_newline": True,
         "vim": False,
+        "lsp": {"enabled": False, "command": []},
     },
     "ui": {"theme": "dark", "ascii": False},
     "index": {"enabled": True, "max_lines": 20000},
     "server": {"lint_before_restart": "warn"},
+    "ai": {"provider": "offline"},
 }
 
 
