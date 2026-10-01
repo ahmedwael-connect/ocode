@@ -79,10 +79,10 @@ def test_packaging_files_exist() -> None:
 def test_version_is_release() -> None:
     from ocode import __version__
 
-    assert __version__ == "1.0.0"
+    assert __version__ == "1.0.2"
     from importlib.metadata import version as _v
 
-    assert _v("ocode") == "1.0.0"
+    assert _v("ocode") == "1.0.2"
 
 
 def test_log_throughput_smoke() -> None:

@@ -1,5 +1,9 @@
 # Changelog (Semantic Versioning)
 
+## 1.0.2 — PyPI re-release (1.0.0/1.0.1 filenames were consumed and deleted upstream)
+
+## 1.0.1 — PyPI re-release (1.0.0 filenames were consumed and deleted upstream)
+
 ## 1.0.0 — publish sprint
 
 - Command palette (`Ctrl+Shift+P`) over every registered command
