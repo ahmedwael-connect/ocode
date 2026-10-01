@@ -1,6 +1,6 @@
 # ocode — smart, Odoo-aware code editor for the terminal
 
-> PRD: [`ocode-requirements.md`](ocode-requirements.md) · License: MIT · Status: v1.0.0-rc1 (M6)
+> PRD: [`ocode-requirements.md`](ocode-requirements.md) · License: MIT · Status: v1.0.0
 
 `ocode` is a terminal (TUI) code editor built for Odoo developers working over
 SSH or on headless servers. It combines editing, Odoo project awareness

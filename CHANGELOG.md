@@ -1,6 +1,10 @@
 # Changelog (Semantic Versioning)
 
-## Unreleased (M7)
+## 1.0.0 — publish sprint
+
+- Command palette (`Ctrl+Shift+P`) over every registered command
+  (closes FR-CMD-001; wires up all unbound commands) + Save As.
+- M7 stack: git, Vim, DB tools, plugins, Docker, LSP, DAP, AI-assist.
 
 - Git: branch/dirty statusbar, diff gutter, blame line, commit screen.
 - Vim modal editing (`hjkl`, operators, visual, `:w`/`:q`).

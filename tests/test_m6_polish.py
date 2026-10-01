@@ -76,13 +76,13 @@ def test_packaging_files_exist() -> None:
     assert bool((ROOT / "debian" / "rules").stat().st_mode & _stat.S_IXUSR)
 
 
-def test_version_is_rc() -> None:
+def test_version_is_release() -> None:
     from ocode import __version__
 
-    assert __version__ == "1.0.0rc1"
+    assert __version__ == "1.0.0"
     from importlib.metadata import version as _v
 
-    assert _v("ocode") == "1.0.0rc1"
+    assert _v("ocode") == "1.0.0"
 
 
 def test_log_throughput_smoke() -> None:

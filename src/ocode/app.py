@@ -78,6 +78,7 @@ from ocode.ui.screens.generate import (
 )
 from ocode.ui.screens.git import GitCommitScreen
 from ocode.ui.screens.info import HelpScreen, HoverScreen
+from ocode.ui.screens.palette import CommandPalette
 from ocode.ui.screens.server import ConfirmScreen, ServerSetupScreen, UpdateChooserScreen
 from ocode.ui.widgets.complete import CompletionPopup
 from ocode.ui.widgets.editor import EditorSaved, OcodeEditor
@@ -841,7 +842,135 @@ class OcodeApp(App[None]):
         self._save_session()
 
     def action_show_palette(self) -> None:
-        self.notify("Command palette lands post-M2 (FR-CMD-001)", timeout=3)
+        items = [(c.id, c.title, c.keybinding or "") for c in self.commands.all()]
+        self.push_screen(CommandPalette(items), self._on_palette_pick)
+
+    def _editor_or_none(self) -> OcodeEditor | None:
+        try:
+            return self.query_one("#editor", OcodeEditor)
+        except Exception:
+            return None
+
+    def _on_palette_pick(self, cid: str | None) -> None:
+        if cid:
+            self._run_command(cid)
+            try:
+                self.query_one("#editor", OcodeEditor).focus()
+            except Exception:
+                pass
+
+    def _run_command(self, cid: str) -> None:
+        ed = self._editor_or_none()
+
+        def _refresh() -> None:
+            if ed is not None:
+                ed.refresh()
+            self.update_chrome()
+
+        def _undo() -> None:
+            if ed is not None:
+                ed.state.undo()
+                _refresh()
+
+        def _redo() -> None:
+            if ed is not None:
+                ed.state.redo()
+                _refresh()
+
+        actions: dict[str, object] = {
+            "ocode.file.save": (lambda: ed._save() if ed else None),
+            "ocode.file.saveAs": self.action_save_as,
+            "ocode.edit.undo": _undo,
+            "ocode.edit.redo": _redo,
+            "ocode.edit.find": self.action_toggle_find,
+            "ocode.edit.findNext": self.action_find_next,
+            "ocode.edit.findPrev": self.action_find_prev,
+            "ocode.edit.replaceAll": self.action_replace_all,
+            "ocode.edit.gotoLine": self.action_goto_line,
+            "ocode.quickopen.open": self.action_quick_open,
+            "ocode.module.jump": self.action_module_jump,
+            "ocode.related.cycle": self.action_related_cycle,
+            "ocode.related.popup": self.action_related_popup,
+            "ocode.search.workspace": self.action_grep,
+            "ocode.sidebar.toggle": self.action_toggle_sidebar,
+            "ocode.view.focusTree": self.action_focus_tree,
+            "ocode.view.focusEditor": self.action_focus_editor,
+            "ocode.view.toggleLogs": self.action_toggle_logs,
+            "ocode.keyfile.manifest": lambda: self.action_keyfile("manifest"),
+            "ocode.keyfile.access": lambda: self.action_keyfile("access"),
+            "ocode.keyfile.views": lambda: self.action_keyfile("views"),
+            "ocode.oss.restart": self._spawn_wrap(self.action_server_restart),
+            "ocode.oss.toggle": self._spawn_wrap(self.action_server_toggle),
+            "ocode.oss.updateCurrent": self._spawn_wrap(self.action_server_update_current),
+            "ocode.oss.updateChoose": self.action_server_update_choose,
+            "ocode.oss.setup": self.action_server_setup,
+            "ocode.complete.force": self.action_show_completion,
+            "ocode.fix.quick": self.action_quick_fix,
+            "ocode.lint.file": self.action_lint_file,
+            "ocode.lint.module": self.action_lint_module,
+            "ocode.goto.definition": self.action_goto_definition,
+            "ocode.goto.references": self.action_goto_references,
+            "ocode.hover.show": self.action_show_hover,
+            "ocode.outline.show": self.action_show_outline,
+            "ocode.problem.next": self.action_problem_next,
+            "ocode.problem.prev": self.action_problem_prev,
+            "ocode.generate.menu": self.action_generate_menu,
+            "ocode.shell.toggle": self.action_shell_toggle,
+            "ocode.shell.stop": self.action_shell_stop,
+            "ocode.shell.send": self.action_shell_send,
+            "ocode.shell.injectSelf": self.action_shell_inject_self,
+            "ocode.snippet.insert": self.action_snippet_insert,
+            "ocode.git.commit": self.action_git_commit,
+            "ocode.git.blame": self.action_git_blame,
+            "ocode.vim.toggle": self.action_toggle_vim,
+            "ocode.db.manage": self.action_db_manage,
+            "ocode.debug.breakpoint": self.action_debug_breakpoint,
+            "ocode.debug.launch": self.action_debug_launch,
+            "ocode.ai.explain": self.action_ai_explain,
+            "ocode.ai.docstring": self.action_ai_docstring,
+            "ocode.log.clear": self.action_log_clear,
+            "ocode.palette.open": (lambda: None),
+            "ocode.app.quit": self.exit,
+        }
+        fn = actions.get(cid)
+        if fn is None:
+            # plugin or future command without a local binding
+            self.notify(f"No handler for {cid} yet", severity="warning")
+            return
+        assert callable(fn)
+        result = fn()
+        if result is not None and hasattr(result, "__await__"):
+            self._spawn(result)
+
+    def _spawn_wrap(self, coro_fn: object) -> object:
+        def _run() -> None:
+            assert callable(coro_fn)
+            self._spawn(coro_fn())
+
+        return _run
+
+    def action_save_as(self) -> None:
+        try:
+            st = self.active_state()
+        except Exception:
+            return
+        initial = str(st.doc.path) if st.doc.path else "untitled.txt"
+        self.push_screen(NameScreen("Save as:", initial), self._on_save_as)
+
+    def _on_save_as(self, dest: str | None) -> None:
+        if not dest:
+            return
+        try:
+            st = self.active_state()
+            path = Path(dest).expanduser()
+            st.save(path)
+            if 0 <= self.tabs.active < len(self.tabs.tabs):
+                self.tabs.tabs[self.tabs.active] = path
+            self._bind_swap(path)
+        except (OSError, ValueError, PermissionError) as exc:
+            self.notify(f"Save failed: {exc}", severity="error")
+            return
+        self.update_chrome()
 
     def action_show_help(self) -> None:
         self.push_screen(HelpScreen(), lambda _x: None)

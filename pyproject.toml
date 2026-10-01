@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ocode"
-version = "1.0.0rc1"
+version = "1.0.0"
 description = "A smart, Odoo-aware code editor for the terminal"
 readme = "README.md"
 requires-python = ">=3.10"

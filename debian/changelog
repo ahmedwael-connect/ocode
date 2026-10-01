@@ -1,3 +1,10 @@
+ocode (1.0.0-1) unstable; urgency=medium
+
+  * v1.0.0: command palette + save-as, M7 stack
+    (git/vim/db/plugins/docker/LSP/DAP/AI).
+
+ -- ocode contributors <dev@ocode.local>  Thu, 01 Oct 2026 00:00:00 +0000
+
 ocode (1.0.0rc1-1) unstable; urgency=medium
 
   * M6 release candidate: help screen, doctor keys, man page,

@@ -69,6 +69,7 @@ HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     )),
     ("Generate", (
         ("Ctrl+Shift+N", "Generators (module/model/view/...)"),
+        ("Ctrl+Shift+P", "Command palette (every action)"),
         ("F1", "This help"),
         ("Ctrl+Q", "Quit"),
     )),
