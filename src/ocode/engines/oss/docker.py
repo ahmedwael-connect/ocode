@@ -113,6 +113,9 @@ async def compose(
             pass
         return (124, "", "timed out")
     code = proc.returncode if proc.returncode is not None else 1
+    from ocode.core.proto import reap_subprocess
+
+    await reap_subprocess([], proc)
     return (code, out.decode("utf-8", errors="ignore"), err.decode("utf-8", errors="ignore"))
 
 
@@ -153,7 +156,7 @@ class LogStream:
                 "docker", "compose", "-f", str(self.project.file),
                 "logs", "-f", "--tail", str(self.tail), self.project.service,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                cwd=str(self.project.directory),
+                cwd=str(self.project.directory), start_new_session=True,
             )
         except (OSError, NotImplementedError):
             return
@@ -170,17 +173,25 @@ class LogStream:
         self._task = asyncio.ensure_future(_pump())
 
     async def stop(self) -> None:
-        if self._proc is not None and self._proc.returncode is None:
+        import os as _os
+        import signal as _signal
+
+        proc, self._proc = self._proc, None
+        if proc is not None and proc.returncode is None:
+            assert proc.pid is not None
             try:
-                self._proc.terminate()
-            except ProcessLookupError:
-                pass
+                _os.killpg(_os.getpgid(proc.pid), _signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
             try:
-                await asyncio.wait_for(self._proc.wait(), 5.0)
+                await asyncio.wait_for(proc.wait(), 5.0)
             except TimeoutError:
                 try:
-                    self._proc.kill()
-                except ProcessLookupError:
+                    _os.killpg(_os.getpgid(proc.pid), _signal.SIGKILL)
+                except (OSError, ProcessLookupError):
                     pass
         # drain pump to EOF so the pipe transport closes cleanly
         if self._task is not None and not self._task.done():
@@ -193,4 +204,3 @@ class LogStream:
                 except asyncio.CancelledError:
                     pass
         self._task = None
-        self._proc = None
