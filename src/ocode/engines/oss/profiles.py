@@ -25,6 +25,8 @@ class ServerProfile:
     lint_before_restart: str = "warn"  # off | warn | block
     systemd_unit: str = "odoo"
     docker_service: str = "odoo"
+    docker_compose: str = ""
+    docker_odoo_bin: str = "odoo"
     auto_update_on_save: bool = False
     stop_timeout: float = 10.0
 
@@ -72,6 +74,8 @@ def load_profiles(workspace: Path) -> dict[str, ServerProfile]:
                 lint_before_restart=str(cfg.get("lint_before_restart", "warn")),
                 systemd_unit=str(cfg.get("systemd_unit", "odoo")),
                 docker_service=str(cfg.get("docker_service", "odoo")),
+                docker_compose=str(cfg.get("docker_compose", "")),
+                docker_odoo_bin=str(cfg.get("docker_odoo_bin", "odoo")),
                 auto_update_on_save=bool(cfg.get("auto_update_on_save", False)),
             )
         except (TypeError, ValueError, AttributeError):
@@ -92,6 +96,8 @@ def save_profiles(workspace: Path, profiles: dict[str, ServerProfile]) -> Path:
             lines.append(f'{key} = "{d.get(key, "")}"\n')
         lines.append(f'systemd_unit = "{d.get("systemd_unit", "odoo")}"\n')
         lines.append(f'docker_service = "{d.get("docker_service", "odoo")}"\n')
+        lines.append(f'docker_compose = "{d.get("docker_compose", "")}"\n')
+        lines.append(f'docker_odoo_bin = "{d.get("docker_odoo_bin", "odoo")}"\n')
         flags = ", ".join(f'"{f}"' for f in d.get("flags", []))
         lines.append(f"flags = [{flags}]\n")
         env = d.get("env", {})

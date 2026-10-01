@@ -99,6 +99,8 @@ class ServerSetupScreen(ModalScreen[ServerProfile | None]):
         )
         yield Input(value=" ".join(p.flags), placeholder="flags", id="sv-flags")
         yield Input(value=p.systemd_unit, placeholder="systemd unit", id="sv-unit")
+        yield Input(value=p.docker_compose, placeholder="compose file", id="sv-compose")
+        yield Input(value=p.docker_service, placeholder="compose service", id="sv-service")
         yield Checkbox("auto-update on save", value=p.auto_update_on_save, id="sv-auto")
         yield Static("", id="sv-preview")
         yield Static("Flags catalog (group: name — help):")
@@ -139,7 +141,9 @@ class ServerSetupScreen(ModalScreen[ServerProfile | None]):
             env=dict(self._profile.env),
             lint_before_restart=self._profile.lint_before_restart,
             systemd_unit=val("sv-unit") or "odoo",
-            docker_service=self._profile.docker_service,
+            docker_service=val("sv-service") or "odoo",
+            docker_compose=val("sv-compose"),
+            docker_odoo_bin=self._profile.docker_odoo_bin,
             auto_update_on_save=bool(auto),
         )
 
