@@ -14,6 +14,7 @@ from ocode import __version__
 from ocode.core.commands import CommandRegistry
 from ocode.core.config import OcodeConfig
 from ocode.core.events import EventBus
+from ocode.core.plugins import PluginAPI, PluginRegistry
 from ocode.core.tasks import TaskScheduler
 from ocode.engines.git.repo import (
     GitRepo,
@@ -229,6 +230,9 @@ class OcodeApp(App[None]):
         self._blame_cache: dict[tuple[str, int], str] = {}
         self._db_conf_cache: DbConf | None = None
         self._db_pending = ""
+        self.plugins = PluginRegistry(
+            PluginAPI(self.commands, self.bus, lambda msg: self.notify(msg, timeout=3))
+        )
 
     # -- compose -------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -273,6 +277,7 @@ class OcodeApp(App[None]):
         self._init_server(ws)
         self._apply_bottom_mode()
         self._init_oki(ws)
+        self._load_plugins()
         self.update_chrome()
         self.set_interval(5.0, self._autoswap)
         self.set_interval(1.0, self._poll_tailer)
@@ -285,6 +290,19 @@ class OcodeApp(App[None]):
             editor.focus()
         except Exception:
             pass
+
+    def _load_plugins(self) -> None:
+        try:
+            loaded = self.plugins.load_all()
+        except OSError:
+            return
+        if self.plugins.errors:
+            first = self.plugins.errors[0]
+            self.notify(f"Plugin '{first.name}' failed: {first.error}", severity="warning")
+        elif loaded:
+            names = ", ".join(p.name for p in loaded[:5])
+            extra = f" +{len(loaded) - 5} more" if len(loaded) > 5 else ""
+            self.notify(f"{len(loaded)} plugin(s): {names}{extra}", timeout=3)
 
     def on_unmount(self) -> None:
         self._save_session()

@@ -1,5 +1,13 @@
 # Changelog (Semantic Versioning)
 
+## Unreleased (M7)
+
+- Git: branch/dirty statusbar, diff gutter, blame line, commit screen.
+- Vim modal editing (`hjkl`, operators, visual, `:w`/`:q`).
+- Databases: list/select/backup/duplicate/drop (`F9`, confirmed).
+- Plugins: `ocode.plugins` entry points (commands + event bus, isolated
+  failures, `doctor` listing).
+
 ## 1.0.0-rc1 — M6: polish & release candidate
 
 - Performance: coalesced log refresh (5k lines/s+), benchmark suite

@@ -83,8 +83,27 @@ flags    = ["--dev=reload,qweb,xml", "--log-level=info"]
 lint_before_restart = "warn"  # off | warn | block
 ```
 
-## Features by milestone
+## Plugins (M7)
 
+Third-party extensions register through the `ocode.plugins` entry-point group:
+
+```toml
+[project.entry-points."ocode.plugins"]
+myplug = "myplug:register"
+```
+
+```python
+from ocode.core.plugins import PluginAPI
+
+def register(api: PluginAPI) -> None:
+    api.commands.register("myplug.hello", "Say Hello", lambda: api.notify("hi"))
+    api.bus.subscribe("server.log", lambda record: ...)
+```
+
+A failing plugin is isolated and reported — it never breaks the host.
+`ocode doctor` lists discovered plugins.
+
+## Features by milestone
 - **M0** — app shell, event bus, layered config, command registry, CLI.
 - **M1** — piece-table buffer, undo groups, multi-cursor, tabs, find/replace,
   tree-sitter-ready highlighting, atomic saves, swap recovery.
@@ -98,6 +117,8 @@ lint_before_restart = "warn"  # off | warn | block
   embedded `odoo shell` (PTY, history, production guard).
 - **M6** — perf pass, `F1` help, `doctor keys`, man page, completions,
   Debian skeleton, v1.0.0-rc1.
+- **M7 (in progress)** — git integration, Vim modal editing, DB helpers,
+  plugin API (`ocode.plugins` entry points).
 
 ## Troubleshooting
 

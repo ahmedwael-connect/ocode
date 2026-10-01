@@ -86,6 +86,20 @@ def cmd_doctor(check: str = "") -> int:
     truecolor = colorterm.lower() in ("truecolor", "24bit") or "direct" in term or kitty
     print(f"terminal: TERM={term} COLORTERM={colorterm or '—'} "
           f"truecolor={'yes' if truecolor else 'no'} kitty-keys={'yes' if kitty else 'no'}")
+    try:
+        from ocode.core.commands import CommandRegistry
+        from ocode.core.events import EventBus
+        from ocode.core.plugins import PluginAPI, PluginRegistry
+
+        registry = PluginRegistry(PluginAPI(CommandRegistry(), EventBus()))
+        eps = registry.discover()
+        if eps:
+            names = ", ".join(getattr(ep, "name", str(ep)) for ep in eps[:10])
+            print(f"plugins: {len(eps)} ({names})")
+        else:
+            print("plugins: none")
+    except OSError:
+        print("plugins: probe failed")
     if check == "keys":
         print("keys: combos that may not reach the app without Kitty protocol:")
         for combo, alt in (("Ctrl+Shift+P/M/F/N", "remap or use F-keys"),
