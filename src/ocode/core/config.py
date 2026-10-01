@@ -20,6 +20,7 @@ DEFAULTS: dict[str, Any] = {
         "insert_spaces": True,
         "trim_trailing_ws": True,
         "ensure_final_newline": True,
+        "vim": False,
     },
     "ui": {"theme": "dark", "ascii": False},
     "index": {"enabled": True, "max_lines": 20000},

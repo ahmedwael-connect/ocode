@@ -5,6 +5,7 @@ from ocode.engines.ote.cursor import CursorSet, Position, Selection
 from ocode.engines.ote.document import Document
 from ocode.engines.ote.highlight import detect_language, highlight_lines
 from ocode.engines.ote.history import EditOp, UndoStack
+from ocode.engines.ote.modal import VimController, VimState
 from ocode.engines.ote.search import FindOptions, SearchEngine
 from ocode.engines.ote.session import SwapManager
 from ocode.engines.ote.state import EditorState
@@ -23,6 +24,8 @@ __all__ = [
     "SwapManager",
     "TabState",
     "UndoStack",
+    "VimController",
+    "VimState",
     "detect_language",
     "highlight_lines",
 ]

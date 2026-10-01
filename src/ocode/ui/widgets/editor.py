@@ -15,6 +15,7 @@ from textual.widget import Widget
 
 from ocode.engines.git.repo import Hunk
 from ocode.engines.ote.highlight import detect_language, highlight_lines
+from ocode.engines.ote.modal import VimController
 from ocode.engines.ote.state import EditorState
 from ocode.ui.widgets.complete import CompletionPopup
 
@@ -47,6 +48,8 @@ class OcodeEditor(Widget, can_focus=True):
         self.show_line_numbers = True
         self._lang = "text"
         self.hunks: list[Hunk] = []  # git diff gutter (M7)
+        self.vim_enabled = False
+        self._vim_ctl: VimController | None = None
 
     @property
     def cursor(self) -> tuple[int, int]:
@@ -161,10 +164,66 @@ class OcodeEditor(Widget, can_focus=True):
     def _app_hook(self, name: str) -> object | None:
         return getattr(self.app, name, None)
 
+    def _save(self) -> None:
+        try:
+            path = self.state.save()
+            self.app.post_message(EditorSaved(path))
+        except (ValueError, PermissionError, OSError):
+            self.notify("Save failed (no path or read-only)", severity="error")
+
+    def _vim_handle(self, key: str, char: str) -> bool | None:
+        """Route vim keys. True=consumed, False=pass to normal editing, None=vim off."""
+        if not self.vim_enabled:
+            return None
+        if self._vim_ctl is None or self._vim_ctl.state is not self.state:
+            clip = self._vim_ctl.clipboard if self._vim_ctl else ""
+            self._vim_ctl = VimController(self.state)
+            self._vim_ctl.clipboard = clip
+        ctl = self._vim_ctl
+        # colon command line (key name varies by layout; match the character)
+        if char == ":" and ctl.vim.mode == "NORMAL" and "ctrl" not in key and "alt" not in key:
+            hook = self._app_hook("vim_command")
+            if callable(hook):
+                hook()
+                return True
+        # app-level chords and function keys pass through (except redo/esc-alias)
+        if key != char and ("ctrl" in key or "alt" in key or key.startswith("f")):
+            if key == "ctrl+r":
+                self.state.redo()
+                self.refresh()
+                return True
+            if key == "ctrl+[":
+                return ctl.handle("escape", "")
+            return False
+        if key == "escape":
+            return ctl.handle("escape", "")
+        if key == "enter":
+            if ctl.vim.mode != "NORMAL":
+                return False
+            self.state.move(dline=1)
+            self.state.home()
+            return True
+        if key == "backspace":
+            if ctl.vim.mode != "NORMAL":
+                return False
+            self.state.move(dcol=-1)
+            return True
+        if len(char) == 1:
+            return ctl.handle(char, char)
+        return False
+
     async def on_key(self, event: events.Key) -> None:
         key = event.key
         st = self.state
         handled = True
+
+        vimmed = self._vim_handle(key, event.character or (key if len(key) == 1 else ""))
+        if vimmed is True:
+            event.prevent_default()
+            event.stop()
+            self.refresh()
+            return
+        # (vimmed False/None → fall through to normal editing)
 
         # completion popup steals navigation/accept keys while open (M4)
         pop = self._popup()
@@ -196,11 +255,7 @@ class OcodeEditor(Widget, can_focus=True):
             if callable(hook):
                 hook()
         elif key == "ctrl+s":
-            try:
-                path = st.save()
-                self.app.post_message(EditorSaved(path))
-            except (ValueError, PermissionError, OSError):
-                self.notify("Save failed (no path or read-only)", severity="error")
+            self._save()
         elif key == "ctrl+z":
             st.undo()
         elif key == "ctrl+y":

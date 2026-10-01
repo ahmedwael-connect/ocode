@@ -121,6 +121,7 @@ def build_default_commands() -> CommandRegistry:
     reg.register("ocode.snippet.insert", "Insert Snippet...")
     reg.register("ocode.git.commit", "Git: Commit...", keybinding="ctrl+shift+g")
     reg.register("ocode.git.blame", "Git: Toggle Blame Line", keybinding="ctrl+shift+b")
+    reg.register("ocode.vim.toggle", "Vim: Toggle Modal Editing")
     reg.register("ocode.app.quit", "Quit", keybinding="ctrl+q")
     return reg
 
@@ -261,7 +262,13 @@ class OcodeApp(App[None]):
         self.set_interval(1.0, self._poll_tailer)
         self.set_interval(0.15, self._poll_shell)
         self.set_interval(2.0, self._poll_git)
-        self.query_one("#editor", OcodeEditor).focus()
+        try:
+            editor = self.query_one("#editor", OcodeEditor)
+            if self.ocode_config is not None:
+                editor.vim_enabled = bool(self.ocode_config.get("editor.vim", False))
+            editor.focus()
+        except Exception:
+            pass
 
     def on_unmount(self) -> None:
         self._save_session()
@@ -699,6 +706,12 @@ class OcodeApp(App[None]):
         segs = [f"{dot2} {fname}", lang, enc, eol, loc]
         if nmatch:
             segs.append(nmatch.strip(" |"))
+        try:
+            vim = self.query_one("#editor", OcodeEditor)
+            if vim.vim_enabled and vim._vim_ctl is not None:
+                segs.append(vim._vim_ctl.status())
+        except Exception:
+            pass
         tail = f"{odoo}{srv_txt}{badge}{idx_txt}{prob_txt}{self._git_segment()}"
         status.update(" | ".join(segs) + tail)
         self._update_bottom_tabs()
@@ -957,6 +970,13 @@ class OcodeApp(App[None]):
             return
         value = event.value
         editor = self.query_one("#editor", OcodeEditor)
+        if value == ":w":
+            editor._save()
+            self.query_one("#editor", OcodeEditor).focus()
+            return
+        if value in (":q", ":q!"):
+            self.exit()
+            return
         if value.startswith(":") and value[1:].isdigit():
             editor.state.goto_line(int(value[1:]))
             editor.refresh()
@@ -1485,6 +1505,43 @@ class OcodeApp(App[None]):
                 self._blame_cache.clear()
         info = self._blame_cache[key]
         return f" | {info}" if info else ""
+
+    def action_toggle_vim(self) -> None:
+        try:
+            editor = self.query_one("#editor", OcodeEditor)
+        except Exception:
+            return
+        editor.vim_enabled = not editor.vim_enabled
+        if editor.vim_enabled and editor._vim_ctl is not None:
+            editor._vim_ctl = None
+        mode = "ON (Esc = normal mode)" if editor.vim_enabled else "OFF"
+        self.notify(f"Vim modal editing {mode}", timeout=2)
+        self.update_chrome()
+
+    def vim_command(self) -> None:
+        try:
+            bar = self.query_one("#findbar", FindBar)
+            inp = self.query_one("#find-input", Input)
+        except Exception:
+            return
+        bar.visible = True
+        bar.set_class(True, "visible")
+        # NOTE: Input selects all on focus; disable for the prefilled ":" line
+        try:
+            inp.select_on_focus = False
+        except AttributeError:
+            pass
+        inp.focus()
+        inp.value = ""
+        inp.action_end()
+        inp.insert_text_at_cursor(":")
+        self.set_timer(0.2, self._reenable_select_on_focus)
+
+    def _reenable_select_on_focus(self) -> None:
+        try:
+            self.query_one("#find-input", Input).select_on_focus = True
+        except Exception:
+            pass
 
     def action_git_blame(self) -> None:
         self._blame_on = not self._blame_on

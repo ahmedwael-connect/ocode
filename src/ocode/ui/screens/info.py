@@ -42,6 +42,7 @@ HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Alt+Up/Down", "Move line"),
         ("Ctrl+F / F3", "Find / next match"),
         ("Ctrl+G", "Go to line (:N in find box)"),
+        ("Vim modal (toggle)", "h j k l w b e 0 $ G, d/y/c + motion, dd yy p, x, u, v, /, :w :q"),
     )),
     ("Odoo intelligence", (
         ("Ctrl+Space", "Completion"),
